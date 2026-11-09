@@ -6,7 +6,11 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moved to a 25.10 image whose ffmpeg 7.1.1 no
+    # longer propagates -color_* through libx265 into the Matroska Colour
+    # element, which breaks the HDR fixture expectations below. 24.04's
+    # ffmpeg 6.1.1 (and the static 7.0.2 dev baseline) both work.
+    runs-on: ubuntu-24.04
     steps:
       - name: Check out code
         uses: actions/checkout@v5

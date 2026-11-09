@@ -20,7 +20,9 @@ permissions:
 
 jobs:
   publish:
-    runs-on: ubuntu-latest
+    # Pinned like tests.yml: the 25.10 image dropped apt-utils (and with it
+    # apt-ftparchive, which lives in that package).
+    runs-on: ubuntu-24.04
     # Only run for the main repo's releases; skip on forks with no signing key.
     # For workflow_run: only act on successful runs of tag pushes (tag = head_branch).
     if: >-
@@ -62,7 +64,7 @@ jobs:
       - name: Install tooling
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq dpkg-dev gnupg
+          sudo apt-get install -y -qq dpkg-dev gnupg apt-utils
 
       - name: Import GPG key
         env:
