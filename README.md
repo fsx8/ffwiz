@@ -182,7 +182,7 @@ A session walks through a handful of small screens:
 2. **File Picker** — browse media files in the working directory or type any path; type-to-filter included.
 3. **Action screen** — depending on your choice:
    - **Inspect** — full ffprobe summary: container, duration, overall bitrate, and one line per stream (codec, resolution, fps / sample rate, channels).
-   - **Modify Tracks** — keep (`k`) / remove (`r`) / convert (`c`) each video/audio/subtitle track, pick codecs (H.264, H.265, VP9, AV1, VP8 for video; AAC, MP3, Opus, FLAC and more for audio; SRT/ASS/mov_text for subtitles) and preview the exact generated FFmpeg command before anything runs.
+   - **Modify Tracks** — keep (`k`) / remove (`r`) / convert (`c`) each video/audio/subtitle track (bulk: `Shift+K`/`Shift+R` act on all tracks, `Shift+C` converts every track of the selected type with one codec pick), pick codecs (H.264, H.265, VP9, AV1, VP8 for video; AAC, MP3, Opus, FLAC and more for audio; SRT/ASS/mov_text for subtitles), see stream titles in the list, and preview the exact generated FFmpeg command before anything runs.
    - **Trim** — lossless cut with `-c copy`; the start automatically snaps to the previous keyframe (probed via ffprobe), so mid-GOP cuts never drop or shorten the video track, and output-side seeking keeps older FFmpeg builds (e.g. 4.x) compatible.
    - **Extract Audio** — rip the audio track to MP3, FLAC or WAV; files without audio are detected up front.
    - **Resize** — 2160p/1080p/720p/480p presets or custom width/height; the free dimension auto-adjusts (even, aspect-preserving). Video re-encodes to H.264, audio is copied.
@@ -219,7 +219,7 @@ video:245900KiB audio:15300KiB subtitle:0KiB other streams:0KiB...
 | Anywhere                       | `Ctrl+C`                  | Cancel the running job                        |
 | Join selection                 | `Space`                   | Toggle/select videos (order is kept)          |
 | Forms (Trim, Extract, outputs) | `Tab` `Shift+Tab` `↑` `↓` | Move between fields; `Enter` continues        |
-| Track editor                   | `k` / `r` / `c`           | Keep / Remove / Convert selected track        |
+| Track editor                   | `k` `r` `c` / `Shift+K` `Shift+R` `Shift+C` | Keep / Remove / Convert selected track; Shift applies to all (`Shift+C` = all of that type) |
 | Execution view                 | `↑` `↓`                   | Scroll the log; `Enter` returns when finished |
 
 ## 🤝 Contributing

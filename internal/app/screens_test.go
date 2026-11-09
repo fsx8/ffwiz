@@ -1639,3 +1639,212 @@ func TestBatchRun_NilProberFailsFilesInsteadOfPanicking(t *testing.T) {
 		t.Fatalf("fail=%d ok=%d, want the file to fail gracefully", st.fail, st.ok)
 	}
 }
+
+// --- bulk actions in the tracks wizard (Shift+K / Shift+R / Shift+C) ---
+
+func TestTrackLineAudioTitle(t *testing.T) {
+	base := trackView{
+		Track:      ffx.Track{Index: 1, Type: ffx.TrackAudio, Codec: "aac"},
+		SampleRate: "48000",
+		Channels:   2,
+		Language:   "eng",
+	}
+
+	if line := trackLine(1, base); !strings.HasSuffix(line, "eng") {
+		t.Fatalf("a track without a title must end at the language, got %q", line)
+	}
+
+	titled := base
+	titled.Title = "Commentary"
+	if line := trackLine(1, titled); !strings.Contains(line, "eng  Commentary") {
+		t.Fatalf("audio lines must carry the title like subs do, got %q", line)
+	}
+
+	long := base
+	long.Title = strings.Repeat("Very Long Commentary Track Name ", 3)
+	line := trackLine(1, long)
+	if strings.Contains(line, "\n") {
+		t.Fatalf("a long title must never wrap the line, got %q", line)
+	}
+	if !strings.Contains(line, "…") {
+		t.Fatalf("an over-budget title must be truncated with an ellipsis, got %q", line)
+	}
+	// The title is the audio line's last segment; measure it directly.
+	sep := "eng  "
+	rest := line[strings.LastIndex(line, sep)+len(sep):]
+	if len([]rune(rest)) > trackTitleBudget {
+		t.Fatalf("truncated title segment is %d runes, want at most %d: %q", len([]rune(rest)), trackTitleBudget, rest)
+	}
+}
+
+func TestTracksWizard_BulkKeysSetAllActions(t *testing.T) {
+	m := tracksWizardForTest()
+	m.tracks = append(m.tracks,
+		trackView{Track: ffx.Track{Index: 2, Type: ffx.TrackSubtitle, Codec: "srt"}, Language: "eng"},
+	)
+	m.actions[2] = ffx.TrackActionInfo{Action: ffx.ActionKeep}
+
+	m.Update(keyMsg("R"))
+	for i := range m.tracks {
+		if m.actions[i].Action != ffx.ActionRemove {
+			t.Fatalf("Shift+R must remove every track, track %d = %s", i, m.actions[i].Action)
+		}
+	}
+
+	m.Update(keyMsg("K"))
+	for i := range m.tracks {
+		if m.actions[i].Action != ffx.ActionKeep {
+			t.Fatalf("Shift+K must keep every track, track %d = %s", i, m.actions[i].Action)
+		}
+	}
+}
+
+func TestTracksWizard_BulkRemoveAllCannotConfirm(t *testing.T) {
+	m := tracksWizardForTest()
+	m.tracks = append(m.tracks,
+		trackView{Track: ffx.Track{Index: 2, Type: ffx.TrackSubtitle, Codec: "srt"}, Language: "eng"},
+	)
+	m.actions[2] = ffx.TrackActionInfo{Action: ffx.ActionKeep}
+
+	m.Update(keyMsg("R"))
+	m.Update(keyMsg("enter")) // tracks -> output
+	m.Update(keyMsg("enter")) // output -> confirm
+	if m.step != "confirm" {
+		t.Fatalf("expected the confirm step, got %q", m.step)
+	}
+
+	_, cmd := m.Update(keyMsg("enter"))
+	if cmd != nil {
+		t.Fatal("an all-removed model must not push the exec screen")
+	}
+	if m.step != "tracks" {
+		t.Fatalf("the all-removed error must fall back to the tracks step, got %q", m.step)
+	}
+	if m.err != "all tracks are removed; nothing to output" {
+		t.Fatalf("err = %q, want the all-removed message", m.err)
+	}
+}
+
+func TestTracksWizard_BulkConvertByType(t *testing.T) {
+	m := tracksWizardForTest()
+	m.tracks = append(m.tracks,
+		trackView{Track: ffx.Track{Index: 2, Type: ffx.TrackAudio, Codec: "dts"}, SampleRate: "48000", Channels: 6, Language: "deu"},
+		trackView{Track: ffx.Track{Index: 3, Type: ffx.TrackSubtitle, Codec: "srt"}, Language: "eng"},
+	)
+	m.actions[2] = ffx.TrackActionInfo{Action: ffx.ActionKeep}
+	m.actions[3] = ffx.TrackActionInfo{Action: ffx.ActionKeep}
+	m.actions[0] = ffx.TrackActionInfo{Action: ffx.ActionRemove} // must stay untouched
+
+	m.Update(keyMsg("down")) // cursor on the first audio track
+	m.Update(keyMsg("C"))
+	if m.step != "codec" || !m.codecBulk {
+		t.Fatalf("Shift+C must open the codec chooser in bulk mode, step=%q bulk=%v", m.step, m.codecBulk)
+	}
+	if m.codecList.Title != "Select codec for all audio tracks" {
+		t.Fatalf("chooser title = %q, want the bulk audio title", m.codecList.Title)
+	}
+	if m.codecBulkType != ffx.TrackAudio {
+		t.Fatalf("bulk type = %q, want audio (captured at open, not from the cursor)", m.codecBulkType)
+	}
+
+	m.Update(keyMsg("enter")) // first audio option is aac
+	if m.step != "tracks" || m.codecBulk {
+		t.Fatalf("applying must leave the codec step and reset bulk, step=%q bulk=%v", m.step, m.codecBulk)
+	}
+	for i := 1; i <= 2; i++ {
+		if m.actions[i] != (ffx.TrackActionInfo{Action: ffx.ActionConvert, Codec: "aac"}) {
+			t.Fatalf("audio track %d = %+v, want convert:aac", i, m.actions[i])
+		}
+	}
+	if m.actions[0].Action != ffx.ActionRemove {
+		t.Fatalf("video action must be untouched, got %s", m.actions[0].Action)
+	}
+	if m.actions[3].Action != ffx.ActionKeep {
+		t.Fatalf("subtitle action must be untouched, got %s", m.actions[3].Action)
+	}
+}
+
+func TestTracksWizard_BulkConvertEscCancels(t *testing.T) {
+	m := tracksWizardForTest()
+	before := m.actions[1]
+
+	m.Update(keyMsg("down"))
+	m.Update(keyMsg("C"))
+	if m.step != "codec" {
+		t.Fatalf("expected the codec step, got %q", m.step)
+	}
+	m.Update(keyMsg("esc"))
+	if m.step != "tracks" || m.codecBulk {
+		t.Fatalf("esc must cancel the bulk chooser, step=%q bulk=%v", m.step, m.codecBulk)
+	}
+	if m.actions[1] != before {
+		t.Fatalf("esc must not change any action, track 1 = %+v, want %+v", m.actions[1], before)
+	}
+}
+
+func TestTracksWizard_SingleTrackKeysStayOnCursor(t *testing.T) {
+	m := tracksWizardForTest()
+	m.tracks = append(m.tracks,
+		trackView{Track: ffx.Track{Index: 2, Type: ffx.TrackSubtitle, Codec: "srt"}, Language: "eng"},
+	)
+	m.actions[2] = ffx.TrackActionInfo{Action: ffx.ActionKeep}
+
+	m.Update(keyMsg("r"))
+	if m.actions[0].Action != ffx.ActionRemove || m.actions[1].Action != ffx.ActionKeep || m.actions[2].Action != ffx.ActionKeep {
+		t.Fatalf("r must only touch the cursor track: %v %v %v", m.actions[0], m.actions[1], m.actions[2])
+	}
+
+	m.Update(keyMsg("k"))
+	if m.actions[0].Action != ffx.ActionKeep {
+		t.Fatalf("k must only touch the cursor track, track 0 = %s", m.actions[0].Action)
+	}
+
+	m.Update(keyMsg("down"))
+	m.Update(keyMsg("c"))
+	if m.step != "codec" || m.codecBulk {
+		t.Fatalf("c must open the single-track chooser, step=%q bulk=%v", m.step, m.codecBulk)
+	}
+	if m.codecList.Title != "Select codec (audio)" {
+		t.Fatalf("single-track chooser title = %q, want the unchanged title", m.codecList.Title)
+	}
+	m.Update(keyMsg("enter")) // first audio option is aac
+	if m.actions[0] != (ffx.TrackActionInfo{Action: ffx.ActionKeep}) || m.actions[2].Action != ffx.ActionKeep {
+		t.Fatal("a single-track convert must not leak to other tracks")
+	}
+	if m.actions[1] != (ffx.TrackActionInfo{Action: ffx.ActionConvert, Codec: "aac"}) {
+		t.Fatalf("cursor track = %+v, want convert:aac", m.actions[1])
+	}
+}
+
+// A title longer than the viewport width must not wrap its track line:
+// the list scrolls exactly one line per track.
+func TestTracksWizard_LongTitleStaysOneLine(t *testing.T) {
+	m := tracksWizardForTest()
+	longTitle := strings.Repeat("Long Commentary Track Name ", 4)
+	m.tracks[1].Title = longTitle
+	m.tracks = append(m.tracks,
+		trackView{Track: ffx.Track{Index: 2, Type: ffx.TrackSubtitle, Codec: "srt"}, Language: "eng", Title: longTitle},
+	)
+	m.actions[2] = ffx.TrackActionInfo{Action: ffx.ActionKeep}
+
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 20})
+	view := m.View()
+
+	lines := 0
+	for _, ln := range strings.Split(view, "\n") {
+		if strings.Contains(ln, "idx=") {
+			lines++
+		}
+	}
+	if lines != len(m.tracks) {
+		t.Fatalf("the view renders %d track lines for %d tracks — a title wrapped:\n%s", lines, len(m.tracks), view)
+	}
+	for i, tv := range m.tracks {
+		if !strings.Contains(view, trackLine(i, tv)) {
+			t.Fatalf("track %d must render on a single line, missing %q:\n%s", i, trackLine(i, tv), view)
+		}
+	}
+	if strings.Contains(view, longTitle) {
+		t.Fatal("an over-budget title must be truncated in the view")
+	}
+}

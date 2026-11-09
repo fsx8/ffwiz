@@ -128,6 +128,35 @@ func TestRemuxConvertAllAudioToAAC(t *testing.T) {
 	assertSeq(t, "audio langs", tagValues(res, "audio", "language"), []string{"eng", "deu", "eng"})
 }
 
+// The bulk-convert shape: one codec choice applied to every audio track
+// while the video copy and all four subtitles are kept explicitly.
+func TestRemuxBulkConvertAllAudioKeepsSubtitles(t *testing.T) {
+	requireTools(t)
+	res := runRemux(t, fx(t, "hdr4k.mkv"), filepath.Join(t.TempDir(), "out.mkv"), map[int]ffx.TrackActionInfo{
+		0: {Action: ffx.ActionKeep},
+		1: {Action: ffx.ActionConvert, Codec: "aac"},
+		2: {Action: ffx.ActionConvert, Codec: "aac"},
+		3: {Action: ffx.ActionConvert, Codec: "aac"},
+		4: {Action: ffx.ActionKeep},
+		5: {Action: ffx.ActionKeep},
+		6: {Action: ffx.ActionKeep},
+		7: {Action: ffx.ActionKeep},
+	})
+	assertSeq(t, "video codecs", codecNames(res, "video"), []string{"hevc"})
+	audios := streamsOfType(res, "audio")
+	if len(audios) != 3 {
+		t.Fatalf("want 3 audio streams, got %d", len(audios))
+	}
+	for i, a := range audios {
+		if a.CodecName != "aac" {
+			t.Fatalf("audio %d = %s, want aac", i, a.CodecName)
+		}
+	}
+	assertSeq(t, "subtitle codecs", codecNames(res, "subtitle"), []string{"subrip", "subrip", "subrip", "ass"})
+	assertSeq(t, "subtitle langs", tagValues(res, "subtitle", "language"), []string{"eng", "deu", "spa", "eng"})
+	assertDuration(t, res, 4, 0.5)
+}
+
 func TestRemuxMixedAudioActions(t *testing.T) {
 	requireTools(t)
 	res := runRemux(t, fx(t, "hdr4k.mkv"), filepath.Join(t.TempDir(), "out.mkv"), map[int]ffx.TrackActionInfo{

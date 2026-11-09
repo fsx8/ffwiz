@@ -12,7 +12,7 @@
 - **Extract Audio**: Rip audio tracks to mp3/flac/wav
 - **Interactive Conversion**: Granular per-track control (keep/remove/convert with codec selection)
 - **Batch Conversion**: Convert a whole directory with quality presets (incl. 2-step GIF palette); the copy preset maps every stream and normalizes per target container (mkv copies everything, mp4/mov re-encode unmuxable audio to AAC and text subs to mov_text while dropping bitmap subs, avi/webm fall back to a re-encode)
-- **Video Editing**: resize (presets/custom, `-2` auto dimension), crop, rotate/flip (transform.go), compress (CRF + x264 preset), speed (setpts + per-track atempo chain, 0.25–4x), reverse, lossless mute (effects.go) — speed/reverse process every probed audio track, not just the first
+- **Video Editing**: resize (presets/custom, `-2` auto dimension), crop, rotate/flip (transform.go), compress (CRF + x264 preset), speed (setpts + per-track atempo chain, 0.25–4x), reverse, lossless mute (effects.go) — speed/reverse process every probed audio track, not just the first; Modify Tracks takes bulk Shift+K/R/C (keep/remove all, convert every track of the cursor type via one codec prompt) and shows track titles, truncated so each track stays one line
 - **Screenshots**: single-frame grab at a timestamp (input-side `-ss`, png/jpg)
 - **Metadata Editor**: lossless tag edit (`-metadata`, keys sorted for determinism) and full strip (`-map_metadata -1 -map_chapters -1` plus per-stream tag clears; `-map 0` is required so ffmpeg's auto-selection does not drop "non-best" streams)
 - **Live Progress Bar**: ffmpeg runs with `-nostats -progress pipe:1`; stdout lines are parsed (`internal/ffmpeg/progress.go`) against ffprobe-derived total duration and rendered as a percent bar with ETA

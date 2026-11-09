@@ -49,10 +49,12 @@ type tracksWizard struct {
 
 	step string // "tracks" | "codec" | "output" | "confirm"
 
-	codecList list.Model
-	out       textinput.Model
-	guard     overwriteGuard
-	vp        viewport.Model // scrolls the track list; keys stay with Update
+	codecList     list.Model
+	codecBulk     bool          // codec choice applies to every track of codecBulkType
+	codecBulkType ffx.TrackType // captured when the chooser opens
+	out           textinput.Model
+	guard         overwriteGuard
+	vp            viewport.Model // scrolls the track list; keys stay with Update
 
 	style lipgloss.Style
 	w, h  int
@@ -133,6 +135,7 @@ func (m *tracksWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			case "codec":
 				m.err = ""
+				m.codecBulk = false
 				m.step = "tracks"
 				return m, nil
 			default:
@@ -173,7 +176,16 @@ func (m *tracksWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.codecList, cmd = m.codecList.Update(msg)
 		if km, ok := msg.(tea.KeyMsg); ok && km.String() == "enter" {
 			if ch, ok := m.codecList.SelectedItem().(simpleItem); ok {
-				m.actions[m.cursor] = ffx.TrackActionInfo{Action: ffx.ActionConvert, Codec: ch.value}
+				if m.codecBulk {
+					for i, tv := range m.tracks {
+						if tv.Track.Type == m.codecBulkType {
+							m.actions[i] = ffx.TrackActionInfo{Action: ffx.ActionConvert, Codec: ch.value}
+						}
+					}
+				} else {
+					m.actions[m.cursor] = ffx.TrackActionInfo{Action: ffx.ActionConvert, Codec: ch.value}
+				}
+				m.codecBulk = false
 				m.step = "tracks"
 				return m, nil
 			}
@@ -250,22 +262,21 @@ func (m *tracksWizard) updateTracksStep(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "k":
 			m.actions[m.cursor] = ffx.TrackActionInfo{Action: ffx.ActionKeep}
 			return m, nil
+		case "K":
+			for i := range m.tracks {
+				m.actions[i] = ffx.TrackActionInfo{Action: ffx.ActionKeep}
+			}
+			return m, nil
+		case "R":
+			for i := range m.tracks {
+				m.actions[i] = ffx.TrackActionInfo{Action: ffx.ActionRemove}
+			}
+			return m, nil
 		case "c":
-			tt := m.tracks[m.cursor].Track.Type
-			opts := ffx.CodecOptions(tt)
-			items := make([]list.Item, 0, len(opts))
-			for _, o := range opts {
-				items = append(items, simpleItem{value: o})
-			}
-			l := list.New(items, list.NewDefaultDelegate(), 0, 0)
-			l.Title = "Select codec (" + string(tt) + ")"
-			l.SetFilteringEnabled(false)
-			l.DisableQuitKeybindings()
-			if m.w > 0 && m.h > 0 {
-				l.SetSize(dim(m.w, 4), dim(m.h, 6))
-			}
-			m.codecList = l
-			m.step = "codec"
+			m.openCodecChooser(m.tracks[m.cursor].Track.Type, false)
+			return m, nil
+		case "C":
+			m.openCodecChooser(m.tracks[m.cursor].Track.Type, true)
 			return m, nil
 		case "enter":
 			m.out.SetValue(defaultModifiedName(m.filePath))
@@ -277,6 +288,32 @@ func (m *tracksWizard) updateTracksStep(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// openCodecChooser branches to the codec step. In bulk mode one choice is
+// applied to every track of the given type; the type is captured here so a
+// later cursor move cannot skew the bulk apply.
+func (m *tracksWizard) openCodecChooser(tt ffx.TrackType, bulk bool) {
+	opts := ffx.CodecOptions(tt)
+	items := make([]list.Item, 0, len(opts))
+	for _, o := range opts {
+		items = append(items, simpleItem{value: o})
+	}
+	l := list.New(items, list.NewDefaultDelegate(), 0, 0)
+	if bulk {
+		l.Title = "Select codec for all " + string(tt) + " tracks"
+	} else {
+		l.Title = "Select codec (" + string(tt) + ")"
+	}
+	l.SetFilteringEnabled(false)
+	l.DisableQuitKeybindings()
+	if m.w > 0 && m.h > 0 {
+		l.SetSize(dim(m.w, 4), dim(m.h, 6))
+	}
+	m.codecList = l
+	m.codecBulk = bulk
+	m.codecBulkType = tt
+	m.step = "codec"
 }
 
 // resizeViewport adapts the track-list viewport to the terminal. The
@@ -325,7 +362,7 @@ func (m *tracksWizard) View() string {
 
 func (m *tracksWizard) tracksView() string {
 	title := lipgloss.NewStyle().Bold(true).Render("Interactive Modify Tracks") + "\n\n"
-	help := lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("↑/↓ navigate • r remove • k keep • c convert • Enter continue • Esc back • q to quit")
+	help := lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("↑/↓ navigate • r/k/c track • K/R all • C all of type • Enter continue • Esc back • q to quit")
 	errLine := renderErrLine(m.err)
 
 	var sb strings.Builder
@@ -388,26 +425,38 @@ func tracksFromProbe(res *ffprobe.ProbeResult) []trackView {
 	return out
 }
 
+// trackTitleBudget caps rendered track titles so a long title can never
+// wrap its line: the viewport scrolls exactly one line per track.
+const trackTitleBudget = 28
+
+// titleSuffix renders a track title as a trailing list segment, truncated
+// with an ellipsis when it exceeds the budget.
+func titleSuffix(title string) string {
+	if title == "" {
+		return ""
+	}
+	if r := []rune(title); len(r) > trackTitleBudget {
+		title = string(r[:trackTitleBudget-1]) + "…"
+	}
+	return "  " + title
+}
+
 func trackLine(i int, tv trackView) string {
 	switch tv.Track.Type {
 	case ffx.TrackVideo:
-		return "[" + strconv.Itoa(i) + "] VIDEO  idx=" + strconv.Itoa(tv.Track.Index) + "  " + tv.Track.Codec + "  " + strconv.Itoa(tv.Width) + "x" + strconv.Itoa(tv.Height) + "  " + tv.FPS
+		return "[" + strconv.Itoa(i) + "] VIDEO  idx=" + strconv.Itoa(tv.Track.Index) + "  " + tv.Track.Codec + "  " + strconv.Itoa(tv.Width) + "x" + strconv.Itoa(tv.Height) + "  " + tv.FPS + titleSuffix(tv.Title)
 	case ffx.TrackAudio:
 		lang := tv.Language
 		if lang == "" {
 			lang = "und"
 		}
-		return "[" + strconv.Itoa(i) + "] AUDIO  idx=" + strconv.Itoa(tv.Track.Index) + "  " + tv.Track.Codec + "  " + tv.SampleRate + "Hz  " + strconv.Itoa(tv.Channels) + "ch  " + lang
+		return "[" + strconv.Itoa(i) + "] AUDIO  idx=" + strconv.Itoa(tv.Track.Index) + "  " + tv.Track.Codec + "  " + tv.SampleRate + "Hz  " + strconv.Itoa(tv.Channels) + "ch  " + lang + titleSuffix(tv.Title)
 	case ffx.TrackSubtitle:
 		lang := tv.Language
 		if lang == "" {
 			lang = "und"
 		}
-		title := tv.Title
-		if title != "" {
-			title = "  " + title
-		}
-		return "[" + strconv.Itoa(i) + "] SUBS   idx=" + strconv.Itoa(tv.Track.Index) + "  " + tv.Track.Codec + "  " + lang + title
+		return "[" + strconv.Itoa(i) + "] SUBS   idx=" + strconv.Itoa(tv.Track.Index) + "  " + tv.Track.Codec + "  " + lang + titleSuffix(tv.Title)
 	default:
 		return "[" + strconv.Itoa(i) + "] " + string(tv.Track.Type) + " idx=" + strconv.Itoa(tv.Track.Index)
 	}
