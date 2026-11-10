@@ -19,8 +19,9 @@ import (
 
 type effectsAudioMsg struct {
 	hasAudio     bool
-	audioStreams int    // probed audio track count; every track must survive
-	note         string // HDR/10-bit warning for re-encoding ops; empty when N/A
+	audioStreams int            // probed audio track count; every track must survive
+	note         string         // HDR/10-bit note for the re-encoding ops; empty when N/A
+	props        ffx.ColorProps // generator input for the HDR-preserving branch
 	err          error
 }
 
@@ -40,6 +41,7 @@ type effectsWizard struct {
 	hasAudio     bool
 	audioStreams int
 	hdrNote      string
+	props        ffx.ColorProps // color props for the HDR-preserving generators
 	fromCustom   bool
 	probing      bool
 	spin         spinner.Model
@@ -274,8 +276,8 @@ func (m *effectsWizard) beginSpeed(f float64) (tea.Model, tea.Cmd) {
 // probeCmd runs a single ffprobe off the UI thread to learn whether the
 // file has audio (speed/reverse re-encode audio only when present), how
 // many audio tracks it carries (every one of them must survive the
-// filter_complex), and whether the source is HDR/10-bit (re-encode
-// warning).
+// filter_complex), and the source color format (both ops re-encode; the
+// HDR-preserving branch and its note come from the same probe).
 func (m *effectsWizard) probeCmd() tea.Cmd {
 	prober := m.cfg.Prober
 	path := m.filePath
@@ -291,13 +293,16 @@ func (m *effectsWizard) probeCmd() tea.Cmd {
 			return effectsAudioMsg{err: err}
 		}
 		note := ""
+		props := ffx.ColorProps{}
 		if s := res.FirstVideo(); s != nil {
-			note = hdrNoteFor(*s)
+			note = hdrPreserveNoteFor(*s)
+			props = colorProps(*s)
 		}
 		return effectsAudioMsg{
 			hasAudio:     res.HasAudio(),
 			audioStreams: len(res.StreamsOfType("audio")),
 			note:         note,
+			props:        props,
 		}
 	}
 }
@@ -319,6 +324,7 @@ func (m *effectsWizard) applyProbe(msg effectsAudioMsg) (tea.Model, tea.Cmd) {
 	m.hasAudio = msg.hasAudio
 	m.audioStreams = msg.audioStreams
 	m.hdrNote = msg.note
+	m.props = msg.props
 	return m.beginOutput()
 }
 
@@ -351,10 +357,10 @@ func (m *effectsWizard) run() (tea.Model, tea.Cmd) {
 	title := ""
 	switch m.op {
 	case "speed":
-		cmd = ffx.BuildSpeedCmd(m.filePath, m.factor, m.hasAudio, m.audioStreams, outPath)
+		cmd = ffx.BuildSpeedCmd(m.filePath, m.factor, m.hasAudio, m.audioStreams, outPath, m.props)
 		title = "Changing speed…"
 	case "reverse":
-		cmd = ffx.BuildReverseCmd(m.filePath, m.hasAudio, m.audioStreams, outPath)
+		cmd = ffx.BuildReverseCmd(m.filePath, m.hasAudio, m.audioStreams, outPath, m.props)
 		title = "Reversing video…"
 	default:
 		cmd = ffx.BuildMuteCmd(m.filePath, outPath)

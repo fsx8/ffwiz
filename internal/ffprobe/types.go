@@ -1,6 +1,7 @@
 package ffprobe
 
 import (
+	"math"
 	"strconv"
 	"strings"
 )
@@ -44,8 +45,97 @@ type Stream struct {
 	ColorTransfer     string            `json:"color_transfer"`
 	ColorPrimaries    string            `json:"color_primaries"`
 	ColorSpace        string            `json:"color_space"`
+	SideData          []StreamSideData  `json:"stream_side_data_list"`
 	Disposition       map[string]any    `json:"disposition"`
 	Tags              map[string]string `json:"tags"`
+}
+
+// SideRational is a defensive number for side-data values: ffprobe emits
+// them either as plain JSON numbers or as "numerator/denominator" strings
+// depending on the ffprobe version and on whether the value came from the
+// container or a decoded bitstream SEI. Anything unparseable degrades to
+// zero instead of failing the whole probe parse.
+type SideRational struct{ Num, Den int64 }
+
+func (r *SideRational) UnmarshalJSON(b []byte) error {
+	*r = SideRational{}
+	s := strings.Trim(string(b), `"`)
+	if s == "" || s == "null" {
+		return nil
+	}
+	num, den, hasDen := strings.Cut(s, "/")
+	n, err := strconv.ParseInt(strings.TrimSpace(num), 10, 64)
+	if err != nil {
+		return nil // tolerate junk rather than aborting the probe
+	}
+	if hasDen {
+		d, err := strconv.ParseInt(strings.TrimSpace(den), 10, 64)
+		if err != nil || d == 0 {
+			return nil // a broken rational is not a number: degrade to zero
+		}
+		r.Num, r.Den = n, d
+		return nil
+	}
+	r.Num = n
+	return nil
+}
+
+// Scaled returns the value in the scaled integer spelling x265's
+// master-display parameter expects (coordinates pre-scaled by 0.00002,
+// luminance by 0.0001 cd/m²): a rational "35400/50000" becomes 35400,
+// while a bare number is already stored in exactly those units.
+func (r SideRational) Scaled(scale int64) int64 {
+	if r.Den == 0 {
+		return r.Num
+	}
+	return int64(math.Round(float64(r.Num) * float64(scale) / float64(r.Den)))
+}
+
+// StreamSideData is one entry of a stream's stream_side_data_list. Only
+// the mastering-display and content-light entries are interpreted (HDR10
+// preservation); unknown side_data_type entries are carried as-is and
+// ignored by callers.
+type StreamSideData struct {
+	SideDataType string `json:"side_data_type"`
+	// Mastering display metadata: primary/white-point chromaticities as
+	// 0.00002-increment values, luminance as 0.0001 cd/m² values.
+	RedX         SideRational `json:"red_x"`
+	RedY         SideRational `json:"red_y"`
+	GreenX       SideRational `json:"green_x"`
+	GreenY       SideRational `json:"green_y"`
+	BlueX        SideRational `json:"blue_x"`
+	BlueY        SideRational `json:"blue_y"`
+	WhiteX       SideRational `json:"white_point_x"`
+	WhiteY       SideRational `json:"white_point_y"`
+	MinLuminance SideRational `json:"min_luminance"`
+	MaxLuminance SideRational `json:"max_luminance"`
+	// Content light level metadata: cd/m² integers.
+	MaxContent SideRational `json:"max_content"`
+	MaxAverage SideRational `json:"max_average"`
+}
+
+// MasteringDisplay returns the stream's "Mastering display metadata" side
+// data; ok is false when the probe carried none (older ffprobe versions do
+// not emit stream_side_data_list at all).
+func (s Stream) MasteringDisplay() (StreamSideData, bool) {
+	for _, sd := range s.SideData {
+		if sd.SideDataType == "Mastering display metadata" {
+			return sd, true
+		}
+	}
+	return StreamSideData{}, false
+}
+
+// ContentLight returns the stream's content light level side data; ok is
+// false when absent. ffprobe spells the type name slightly differently
+// across versions ("Content light level" vs "... level metadata").
+func (s Stream) ContentLight() (StreamSideData, bool) {
+	for _, sd := range s.SideData {
+		if sd.SideDataType == "Content light level" || sd.SideDataType == "Content light level metadata" {
+			return sd, true
+		}
+	}
+	return StreamSideData{}, false
 }
 
 // Duration returns the container duration in seconds; ok is false when the

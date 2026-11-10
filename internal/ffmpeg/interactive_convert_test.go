@@ -498,3 +498,64 @@ func TestInteractiveConvert_X265ConversionIntoMP4GetsHvc1Tag(t *testing.T) {
 		t.Fatalf("tag = %q, want hvc1", got)
 	}
 }
+
+// Converting an HDR/10-bit video track to libx265 keeps bit depth and
+// signaling: the per-output-index filter lays in the setparams side data
+// and the metadata rides along as encoder parameters.
+func TestInteractiveConvert_X265OnHDRGetsTenBitBranch(t *testing.T) {
+	tracks := []Track{
+		{Index: 0, Type: TrackVideo, Codec: "hevc", Color: testHDRProps},
+		{Index: 2, Type: TrackAudio, Codec: "aac"},
+	}
+	cmd := BuildInteractiveConvertCmd("in.mkv", "out.mkv", tracks,
+		map[int]TrackActionInfo{0: {Action: ActionConvert, Codec: "libx265 (H.265/HEVC)"}})
+	if cmd == nil {
+		t.Fatal("expected cmd")
+	}
+	if got, want := flagValue(cmd.Args, "-filter:v:0"), testHDRSuffix; got != want {
+		t.Fatalf("-filter:v:0 = %q, want %q", got, want)
+	}
+	if got, want := flagValue(cmd.Args, "-x265-params:v:0"), testHDRParams; got != want {
+		t.Fatalf("-x265-params:v:0 = %q, want %q", got, want)
+	}
+	if got := flagValue(cmd.Args, "-crf:v:0"); got != "28" {
+		t.Fatalf("-crf:v:0 = %q, want 28 (unchanged quality choice)", got)
+	}
+	if got := flagValue(cmd.Args, "-pix_fmt:v:0"); got != "" {
+		t.Fatalf("the HDR branch must not force -pix_fmt, got %q", got)
+	}
+}
+
+// An SDR source converts to libx265 exactly as before: no filter, no
+// encoder metadata parameters.
+func TestInteractiveConvert_X265OnSDRStaysUnchanged(t *testing.T) {
+	tracks := []Track{{Index: 0, Type: TrackVideo, Codec: "h264"}}
+	cmd := BuildInteractiveConvertCmd("in.mkv", "out.mkv", tracks,
+		map[int]TrackActionInfo{0: {Action: ActionConvert, Codec: "libx265 (H.265/HEVC)"}})
+	if cmd == nil {
+		t.Fatal("expected cmd")
+	}
+	if got := flagValue(cmd.Args, "-filter:v:0"); got != "" {
+		t.Fatalf("SDR x265 conversion must not filter, got -filter:v:0 %q", got)
+	}
+	if got := flagValue(cmd.Args, "-x265-params:v:0"); got != "" {
+		t.Fatalf("SDR x265 conversion must not emit -x265-params, got %q", got)
+	}
+}
+
+// The crushing codec choice keeps its 8-bit pipeline even on an HDR
+// source: only libx265 gets the preserving branch.
+func TestInteractiveConvert_X264OnHDRStaysEightBit(t *testing.T) {
+	tracks := []Track{{Index: 0, Type: TrackVideo, Codec: "hevc", Color: testHDRProps}}
+	cmd := BuildInteractiveConvertCmd("in.mkv", "out.mkv", tracks,
+		map[int]TrackActionInfo{0: {Action: ActionConvert, Codec: "libx264 (H.264)"}})
+	if cmd == nil {
+		t.Fatal("expected cmd")
+	}
+	if got, want := flagValue(cmd.Args, "-pix_fmt:v:0"), "yuv420p"; got != want {
+		t.Fatalf("-pix_fmt:v:0 = %q, want %q (x264 choice stays 8-bit)", got, want)
+	}
+	if got := flagValue(cmd.Args, "-filter:v:0"); got != "" {
+		t.Fatalf("x264 conversion must not filter, got -filter:v:0 %q", got)
+	}
+}

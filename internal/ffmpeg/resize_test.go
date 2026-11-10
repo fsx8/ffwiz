@@ -50,3 +50,22 @@ func TestBuildResizeCmd_AutoDimensionsPassThrough(t *testing.T) {
 		t.Fatalf("-vf = %q, want %q (-2 must pass through to the scale filter)", got, want)
 	}
 }
+
+// The HDR branch composes setparams after the scale filter; the -2
+// auto-dimension logic keeps working unchanged.
+func TestBuildResizeCmd_HDRComposesAfterScale(t *testing.T) {
+	cmd := BuildResizeCmd("in.mkv", -2, 720, "out.mkv", testHDRProps)
+	want := []string{
+		"-i", "in.mkv",
+		"-vf", "scale=w=-2:h=720," + testHDRSuffix,
+		"-c:v", "libx265",
+		"-crf", "22",
+		"-preset", "medium",
+		"-x265-params", testHDRParams,
+		"-c:a", "copy",
+		"-y", "out.mkv",
+	}
+	if !reflect.DeepEqual(cmd.Args, want) {
+		t.Fatalf("got  %#v\nwant %#v", cmd.Args, want)
+	}
+}

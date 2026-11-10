@@ -364,6 +364,7 @@ func (m *tracksWizard) tracksView() string {
 	title := lipgloss.NewStyle().Bold(true).Render("Interactive Modify Tracks") + "\n\n"
 	help := lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("↑/↓ navigate • r/k/c track • K/R all • C all of type • Enter continue • Esc back • q to quit")
 	errLine := renderErrLine(m.err)
+	warnLine := m.hdrConvertLine()
 
 	var sb strings.Builder
 	for i, tv := range m.tracks {
@@ -387,7 +388,48 @@ func (m *tracksWizard) tracksView() string {
 	// the viewport was resized).
 	m.vp.SetContent(sb.String())
 	m.followCursor()
-	return title + m.vp.View() + "\n" + help + errLine
+	return title + m.vp.View() + "\n" + help + warnLine + errLine
+}
+
+// hdrConvertLine renders the note for an armed video conversion: crushing
+// codecs warn about the washed-out 8-bit output, libx265 gets the
+// 10-bit-preserving note; "" when no conversion applies to an HDR source.
+func (m *tracksWizard) hdrConvertLine() string {
+	note := hdrConvertNote(m.tracks, m.actions)
+	if note == "" {
+		return ""
+	}
+	return "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render(note)
+}
+
+// hdrConvertNote inspects every armed video conversion and returns the one
+// note that matters (a crushing warning wins over the preserving note —
+// the destructive outcome deserves the louder message).
+func hdrConvertNote(tracks []trackView, actions map[int]ffx.TrackActionInfo) string {
+	info := ""
+	for i, tv := range tracks {
+		if tv.Track.Type != ffx.TrackVideo {
+			continue
+		}
+		if !tv.Track.Color.HDR() {
+			continue
+		}
+		ai, ok := actions[i]
+		if !ok || ai.Action != ffx.ActionConvert {
+			continue
+		}
+		switch ffx.CleanCodecChoice(ai.Codec) {
+		case "libx265":
+			if info == "" {
+				info = preserveNoteFor(tv.Track.Color.Transfer, tv.Track.Color.PixFmt)
+			}
+		default:
+			// Every other video codec choice (x264/VP9/VP8/AV1) encodes
+			// 8-bit without tone mapping.
+			return crushNoteFor(tv.Track.Color.Transfer, tv.Track.Color.PixFmt)
+		}
+	}
+	return info
 }
 
 func tracksFromProbe(res *ffprobe.ProbeResult) []trackView {
@@ -411,6 +453,7 @@ func tracksFromProbe(res *ffprobe.ProbeResult) []trackView {
 				Index: s.Index,
 				Type:  ffx.TrackType(s.CodecType),
 				Codec: s.CodecName,
+				Color: colorProps(s),
 			},
 			Width:      s.Width,
 			Height:     s.Height,

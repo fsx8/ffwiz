@@ -236,10 +236,11 @@ func (m *compressWizard) selectSpeed() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.preset = fi.value
-	// Compression re-encodes to 8-bit, so check the source color format
-	// before showing the output step.
+	// Compression re-encodes the video, so check the source color format:
+	// the probe decides between the HDR-preserving 10-bit branch and the
+	// historical 8-bit command, and the note tells the user which one runs.
 	m.step = "probing"
-	return m, tea.Batch(m.spin.Tick, m.hdr.begin(m.cfg.Prober, m.filePath))
+	return m, tea.Batch(m.spin.Tick, m.hdr.begin(m.cfg.Prober, m.filePath, hdrPreserveNoteFor))
 }
 
 func (m *compressWizard) beginOutput() (tea.Model, tea.Cmd) {
@@ -260,7 +261,7 @@ func (m *compressWizard) run() (tea.Model, tea.Cmd) {
 	if m.guard.shouldWarn(outPath) {
 		return m, nil
 	}
-	cmd := ffx.BuildCompressCmd(m.filePath, m.crfV, m.preset, outPath)
+	cmd := ffx.BuildCompressCmd(m.filePath, m.crfV, m.preset, outPath, m.hdr.props)
 	return m, push(newExecScreen(m.cfg, "Compressing video…", execx.Cmd{Name: "ffmpeg", Args: cmd.Args}))
 }
 

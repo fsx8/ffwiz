@@ -125,6 +125,9 @@ echo "  chapters.mkv          basic.mp4 + 2 chapters (metadata strip)"
 # (srt x3, ass). The DTS encoder is core-only and experimental: ffmpeg
 # cannot encode DTS-HD MA, but codec_name=dts drives the same conversion
 # path in ffwiz (DTS family -> EAC3 for device compatibility).
+# The HDR signaling is laid in via the setparams filter, NOT the -color_*
+# output flags: since ffmpeg 7.1 those no longer reach the muxer, while
+# filter side data is muxed on every version (6.1 included).
 cat > "$OUT/hdr4k_en.srt" <<'EOF'
 1
 00:00:00,500 --> 00:00:02,000
@@ -171,9 +174,8 @@ $FF -f lavfi -i "testsrc2=size=3840x2160:rate=24:duration=4" \
     -f lavfi -i "sine=frequency=220:sample_rate=48000:duration=4" \
     -i "$OUT/hdr4k_en.srt" -i "$OUT/hdr4k_de.srt" -i "$OUT/hdr4k_es.srt" -i "$OUT/hdr4k_en.ass" \
     -map 0:v -map 1:a -map 2:a -map 3:a -map 4:s -map 5:s -map 6:s -map 7:s \
-    -vf format=yuv420p10le \
+    -vf "setparams=color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc,format=yuv420p10le" \
     -c:v libx265 -preset ultrafast -crf 40 -g 48 \
-    -color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc \
     -x265-params "profile=main10:log-level=error" \
     -filter:a:0 "aformat=channel_layouts=5.1" -c:a:0 dts -strict -2 -b:a:0 768k \
     -filter:a:1 "aformat=channel_layouts=5.1" -c:a:1 eac3 -b:a:1 384k \
@@ -188,5 +190,21 @@ $FF -f lavfi -i "testsrc2=size=3840x2160:rate=24:duration=4" \
     -metadata:s:s:3 language=eng \
     -shortest "$OUT/hdr4k.mkv"
 echo "  hdr4k.mkv (+4 subtitle files)  3840x2160 HEVC HDR10, dts+eac3+aac, 4 subs"
+
+# ------------------------------------------------------- small hdr fixture
+# hdr_small.mkv — fast HDR10 sample for the HDR re-encode integration
+# tests: testsrc2 480x270, 10 s, 10-bit HEVC. The HDR signaling is laid in
+# via the setparams filter, NOT the -color_* output flags: since ffmpeg
+# 7.1 those no longer reach the muxer, while filter side data is muxed on
+# every version. x265 additionally writes a matching mastering-display SEI
+# (hdr10 params), and a stereo AAC track feeds the speed/reverse paths.
+$FF -f lavfi -i "testsrc2=size=480x270:rate=24:duration=10" \
+    -f lavfi -i "sine=frequency=440:sample_rate=48000:duration=10" \
+    -vf "setparams=color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc,format=yuv420p10le" \
+    -c:v libx265 -preset medium -crf 22 -g 48 \
+    -x265-params "hdr10=1:master-display=G(8500,39850)B(6550,2300)R(35400,14600)WP(15635,16450)L(10000000,1):max-cll=1000,400:log-level=error" \
+    -ac 2 -c:a aac -b:a 96k \
+    -shortest "$OUT/hdr_small.mkv"
+echo "  hdr_small.mkv         480x270 HEVC 10-bit HDR10 + aac, 10s"
 
 echo "Done. $(ls "$OUT" | wc -l) files in $OUT"

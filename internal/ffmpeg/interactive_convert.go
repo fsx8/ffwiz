@@ -149,6 +149,17 @@ func appendVideoArgs(args []string, outIndex int, ot outTrack, tagHVC1 bool) []s
 				fmt.Sprintf("-crf:v:%d", outIndex), "28",
 				fmt.Sprintf("-preset:v:%d", outIndex), "medium",
 			)
+			// An HDR/10-bit source keeps its signaling and bit depth:
+			// setparams lays the color metadata into the frames (the
+			// -color_* output flags no longer reach the muxer on ffmpeg
+			// 7.1+/8.x) and the format filter makes the output 10-bit.
+			// SDR sources convert exactly as before.
+			if c := ot.track.Color; c.HDR() {
+				args = append(args, fmt.Sprintf("-filter:v:%d", outIndex), c.FilterSuffix())
+				if p := c.X265Params(); p != "" {
+					args = append(args, fmt.Sprintf("-x265-params:v:%d", outIndex), p)
+				}
+			}
 		case "libvpx-vp9":
 			args = append(args,
 				fmt.Sprintf("-crf:v:%d", outIndex), "31",

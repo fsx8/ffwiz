@@ -234,7 +234,8 @@ func (m *resizeWizard) applyCustom() (tea.Model, tea.Cmd) {
 }
 
 // beginProbe stores the chosen dimensions and checks the source color
-// format (resize re-encodes to 8-bit) before showing the output step.
+// format (resize re-encodes the video; the probe feeds the HDR-preserving
+// branch and its note) before showing the output step.
 func (m *resizeWizard) beginProbe(width, height int, label string) (tea.Model, tea.Cmd) {
 	m.outWidth = width
 	m.outHeight = height
@@ -242,7 +243,7 @@ func (m *resizeWizard) beginProbe(width, height int, label string) (tea.Model, t
 	m.step = "probing"
 	m.width.Blur()
 	m.height.Blur()
-	return m, tea.Batch(m.spin.Tick, m.hdr.begin(m.cfg.Prober, m.filePath))
+	return m, tea.Batch(m.spin.Tick, m.hdr.begin(m.cfg.Prober, m.filePath, hdrPreserveNoteFor))
 }
 
 func (m *resizeWizard) beginOutput() (tea.Model, tea.Cmd) {
@@ -263,7 +264,7 @@ func (m *resizeWizard) run() (tea.Model, tea.Cmd) {
 	if m.guard.shouldWarn(outPath) {
 		return m, nil
 	}
-	cmd := ffx.BuildResizeCmd(m.filePath, m.outWidth, m.outHeight, outPath)
+	cmd := ffx.BuildResizeCmd(m.filePath, m.outWidth, m.outHeight, outPath, m.hdr.props)
 	return m, push(newExecScreen(m.cfg, "Resizing video…", execx.Cmd{Name: "ffmpeg", Args: cmd.Args}))
 }
 

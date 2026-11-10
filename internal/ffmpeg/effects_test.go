@@ -128,6 +128,49 @@ func TestBuildSpeedCmd_InvalidFactorYieldsZeroCmd(t *testing.T) {
 	}
 }
 
+// An HDR/10-bit source re-encodes in 10-bit HEVC with the setparams
+// signaling composed into the same filtergraph and the x265 metadata
+// parameters appended; no -pix_fmt is set (the format filter decides).
+func TestBuildSpeedCmd_HDRSourceKeepsTenBit(t *testing.T) {
+	want := []string{
+		"-i", "in.mkv",
+		"-filter_complex", "[0:v]setpts=PTS/2," + testHDRSuffix + "[v];[0:a:0]atempo=2.0[a0]",
+		"-map", "[v]",
+		"-map", "[a0]",
+		"-c:v", "libx265",
+		"-crf", "22",
+		"-preset", "medium",
+		"-x265-params", testHDRParams,
+		"-c:a", "aac",
+		"-b:a", "192k",
+		"-y", "out.mkv",
+	}
+	cmd := BuildSpeedCmd("in.mkv", 2, true, 1, "out.mkv", testHDRProps)
+	if !reflect.DeepEqual(cmd.Args, want) {
+		t.Fatalf("got  %#v\nwant %#v", cmd.Args, want)
+	}
+}
+
+// Without probed metadata the x265 parameters are simply omitted; the
+// 10-bit branch itself stays.
+func TestBuildSpeedCmd_HDRSourceWithoutMetadataOmitsX265Params(t *testing.T) {
+	cmd := BuildSpeedCmd("in.mkv", 2, true, 1, "out.mkv", ColorProps{PixFmt: "yuv420p10le"})
+	for _, a := range cmd.Args {
+		if a == "-x265-params" {
+			t.Fatalf("no metadata probed; must not emit -x265-params: %#v", cmd.Args)
+		}
+		if a == "-pix_fmt" {
+			t.Fatalf("the HDR branch must not force -pix_fmt: %#v", cmd.Args)
+		}
+	}
+	if got, want := flagValue(cmd.Args, "-filter_complex"), "[0:v]setpts=PTS/2,format=yuv420p10le[v];[0:a:0]atempo=2.0[a0]"; got != want {
+		t.Fatalf("filter_complex = %q, want %q", got, want)
+	}
+	if got := flagValue(cmd.Args, "-c:v"); got != "libx265" {
+		t.Fatalf("-c:v = %q, want libx265", got)
+	}
+}
+
 func TestBuildReverseCmd_WithAudioReencodesBoth(t *testing.T) {
 	want := []string{
 		"-i", "in.mp4",
@@ -182,6 +225,45 @@ func TestBuildReverseCmd_WithoutAudioUsesVF(t *testing.T) {
 	}
 	if got := flagValue(cmd.Args, "-c:v"); got != "libx264" {
 		t.Fatalf("-c:v = %q, want libx264", got)
+	}
+	if got := flagValue(cmd.Args, "-filter_complex"); got != "" {
+		t.Fatalf("video-only reverse must not use -filter_complex, got %q", got)
+	}
+}
+
+// Reversing an HDR/10-bit source keeps the bit depth and signaling: the
+// setparams segment composes after reverse in the same filtergraph.
+func TestBuildReverseCmd_HDRSourceKeepsTenBit(t *testing.T) {
+	want := []string{
+		"-i", "in.mkv",
+		"-filter_complex", "[0:v]reverse," + testHDRSuffix + "[v];[0:a:0]areverse[a0]",
+		"-map", "[v]",
+		"-map", "[a0]",
+		"-c:v", "libx265",
+		"-crf", "22",
+		"-preset", "medium",
+		"-x265-params", testHDRParams,
+		"-c:a", "aac",
+		"-b:a", "192k",
+		"-y", "out.mkv",
+	}
+	cmd := BuildReverseCmd("in.mkv", true, 1, "out.mkv", testHDRProps)
+	if !reflect.DeepEqual(cmd.Args, want) {
+		t.Fatalf("got  %#v\nwant %#v", cmd.Args, want)
+	}
+}
+
+// The video-only HDR reverse uses the -vf form like its SDR counterpart.
+func TestBuildReverseCmd_HDRSourceWithoutAudioUsesVF(t *testing.T) {
+	cmd := BuildReverseCmd("in.mkv", false, 0, "out.mkv", testHDRProps)
+	if got, want := flagValue(cmd.Args, "-vf"), "reverse,"+testHDRSuffix; got != want {
+		t.Fatalf("-vf = %q, want %q", got, want)
+	}
+	if got := flagValue(cmd.Args, "-c:v"); got != "libx265" {
+		t.Fatalf("-c:v = %q, want libx265", got)
+	}
+	if got := flagValue(cmd.Args, "-c:a"); got != "copy" {
+		t.Fatalf("-c:a = %q, want copy (no audio to re-encode)", got)
 	}
 	if got := flagValue(cmd.Args, "-filter_complex"); got != "" {
 		t.Fatalf("video-only reverse must not use -filter_complex, got %q", got)

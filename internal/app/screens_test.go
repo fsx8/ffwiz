@@ -1405,6 +1405,48 @@ func TestTracksWizard_CoverArtHiddenFromTrackList(t *testing.T) {
 	}
 }
 
+// --- HDR: track color props flow into the wizard and armed conversions
+// surface the matching note in the view ---
+
+func TestTracksFromProbeCarriesColorProps(t *testing.T) {
+	res := videoWithAudio("10")
+	res.Streams[0].PixFmt = "yuv420p10le"
+	res.Streams[0].ColorTransfer = "smpte2084"
+	res.Streams[0].ColorPrimaries = "bt2020"
+	res.Streams[0].ColorSpace = "bt2020nc"
+	tvs := tracksFromProbe(res)
+	if !tvs[0].Track.Color.HDR() {
+		t.Fatalf("the video track must carry the probed HDR color props, got %+v", tvs[0].Track.Color)
+	}
+	if got := tvs[0].Track.Color.Transfer; got != "smpte2084" || tvs[0].Track.Color.Primaries != "bt2020" {
+		t.Fatalf("color props must be forwarded verbatim, got %+v", tvs[0].Track.Color)
+	}
+}
+
+func TestTracksWizard_ViewShowsConvertNote(t *testing.T) {
+	m := newTracksWizard(Config{}, "/tmp/x.mp4")
+	m.loading = false
+	m.tracks = []trackView{
+		{Track: ffx.Track{Index: 0, Type: ffx.TrackVideo, Codec: "hevc",
+			Color: ffx.ColorProps{PixFmt: "yuv420p10le", Transfer: "smpte2084", Primaries: "bt2020"}}},
+	}
+
+	m.actions[0] = ffx.TrackActionInfo{Action: ffx.ActionConvert, Codec: "libx265 (H.265/HEVC)"}
+	if view := m.View(); !strings.Contains(view, "10-bit HEVC") {
+		t.Fatalf("an armed libx265 conversion on HDR must show the preserving note, view: %s", view)
+	}
+
+	m.actions[0] = ffx.TrackActionInfo{Action: ffx.ActionConvert, Codec: "libx264 (H.264)"}
+	if view := m.View(); !strings.Contains(view, "8-bit SDR") {
+		t.Fatalf("an armed libx264 conversion on HDR must warn about crushing, view: %s", view)
+	}
+
+	m.actions[0] = ffx.TrackActionInfo{Action: ffx.ActionKeep}
+	if view := m.View(); strings.Contains(view, "8-bit SDR") || strings.Contains(view, "10-bit HEVC") {
+		t.Fatalf("no note expected while nothing is armed, view: %s", view)
+	}
+}
+
 // --- m18: focus ring stepping ---
 
 func TestFocusStep(t *testing.T) {

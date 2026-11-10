@@ -33,7 +33,11 @@ func transformOutputName(inputPath, suffix string) string {
 
 // BuildRotateCmd rotates the video by 90, 180 or 270 degrees and re-encodes
 // it with the standard encoding tail. Any other angle yields a zero Cmd.
-func BuildRotateCmd(inputPath string, degrees int, outputPath string) Cmd {
+// An optional trailing ColorProps (the probed color format) switches to
+// 10-bit HEVC with the source's HDR signaling laid in via setparams after
+// the transform filter; omitting it keeps the historical 8-bit x264
+// command. The same applies to flip and crop below.
+func BuildRotateCmd(inputPath string, degrees int, outputPath string, color ...ColorProps) Cmd {
 	var filter string
 	switch degrees {
 	case 90:
@@ -46,14 +50,14 @@ func BuildRotateCmd(inputPath string, degrees int, outputPath string) Cmd {
 		return Cmd{}
 	}
 	return Cmd{
-		Args: appendReencodeArgs([]string{"-i", inputPath, "-vf", filter}, outputPath),
+		Args: reencodeArgs([]string{"-i", inputPath}, filter, outputPath, hdrProps(color)),
 	}
 }
 
 // BuildFlipCmd mirrors the video horizontally ("h") or vertically ("v") and
 // re-encodes it with the standard encoding tail. Any other direction yields
 // a zero Cmd.
-func BuildFlipCmd(inputPath, direction, outputPath string) Cmd {
+func BuildFlipCmd(inputPath, direction, outputPath string, color ...ColorProps) Cmd {
 	var filter string
 	switch direction {
 	case "h":
@@ -64,7 +68,7 @@ func BuildFlipCmd(inputPath, direction, outputPath string) Cmd {
 		return Cmd{}
 	}
 	return Cmd{
-		Args: appendReencodeArgs([]string{"-i", inputPath, "-vf", filter}, outputPath),
+		Args: reencodeArgs([]string{"-i", inputPath}, filter, outputPath, hdrProps(color)),
 	}
 }
 
@@ -73,16 +77,17 @@ func BuildFlipCmd(inputPath, direction, outputPath string) Cmd {
 // be non-negative; anything else yields a zero Cmd. x=0/y=0 (top-left
 // origin) is the most common crop and fully valid. Whether the window fits
 // the source is ffmpeg's job to reject.
-func BuildCropCmd(inputPath string, x, y, width, height int, outputPath string) Cmd {
+func BuildCropCmd(inputPath string, x, y, width, height int, outputPath string, color ...ColorProps) Cmd {
 	if width <= 0 || height <= 0 || x < 0 || y < 0 {
 		return Cmd{}
 	}
 	filter := fmt.Sprintf("crop=w=%d:h=%d:x=%d:y=%d", width, height, x, y)
 	return Cmd{
-		Args: appendReencodeArgs([]string{"-i", inputPath, "-vf", filter}, outputPath),
+		Args: reencodeArgs([]string{"-i", inputPath}, filter, outputPath, hdrProps(color)),
 	}
 }
 
+// appendReencodeArgs appends the standard 8-bit SDR encoding tail.
 func appendReencodeArgs(args []string, outputPath string) []string {
 	return append(args,
 		"-c:v", "libx264",
@@ -92,4 +97,15 @@ func appendReencodeArgs(args []string, outputPath string) []string {
 		"-c:a", "copy",
 		"-y", outputPath,
 	)
+}
+
+// reencodeArgs finishes a simple geometric-filter command: an HDR/10-bit
+// source gets the source's signaling composed into the filtergraph after
+// the geometric filter plus the 10-bit HEVC tail, an SDR source keeps the
+// historical 8-bit x264 command byte-for-byte.
+func reencodeArgs(args []string, filter, outputPath string, c ColorProps) []string {
+	if c.HDR() {
+		return appendHDRReencodeArgs(append(args, "-vf", filter+","+c.FilterSuffix()), c, outputPath)
+	}
+	return appendReencodeArgs(append(args, "-vf", filter), outputPath)
 }

@@ -109,3 +109,113 @@ func TestProbeResultDurationHandlesNA(t *testing.T) {
 		}
 	}
 }
+
+// stream_side_data_list arrives in more than one shape depending on the
+// ffprobe version and on whether the values came from the container or a
+// decoded bitstream SEI: plain integers or "numerator/denominator"
+// rationals. Both must parse, unknown side_data_type entries must be
+// ignored, and an absent list must simply find nothing.
+func TestStreamSideDataParse(t *testing.T) {
+	// Shape 1: integer values as container-formats store them (already
+	// scaled: coordinates 0.00002, luminance 0.0001 cd/m²).
+	const ints = `{
+	  "streams": [{
+	    "codec_type": "video",
+	    "side_data_list": [],
+	    "stream_side_data_list": [
+	      {"side_data_type": "Mastering display metadata",
+	       "red_x": 35400, "red_y": 14600,
+	       "green_x": 8500, "green_y": 39850,
+	       "blue_x": 6550, "blue_y": 2300,
+	       "white_point_x": 15635, "white_point_y": 16450,
+	       "min_luminance": 1, "max_luminance": 10000000},
+	      {"side_data_type": "Content light level",
+	       "max_content": 1000, "max_average": 400}
+	    ]
+	  }]
+	}`
+
+	// Shape 2: rational strings as decoded SEI side data prints them,
+	// plus an unknown entry type and the "... metadata" spelling of the
+	// content light level.
+	const rationals = `{
+	  "streams": [{
+	    "codec_type": "video",
+	    "stream_side_data_list": [
+	      {"side_data_type": "H.26[45] User Data Unregistered SEI message"},
+	      {"side_data_type": "Mastering display metadata",
+	       "red_x": "35400/50000", "red_y": "14600/50000",
+	       "green_x": "8500/50000", "green_y": "39850/50000",
+	       "blue_x": "6550/50000", "blue_y": "2300/50000",
+	       "white_point_x": "15635/50000", "white_point_y": "16450/50000",
+	       "min_luminance": "1/10000", "max_luminance": "10000000/10000"},
+	      {"side_data_type": "Content light level metadata",
+	       "max_content": 1000, "max_average": 400}
+	    ]
+	  }]
+	}`
+
+	for name, sample := range map[string]string{"integers": ints, "rationals": rationals} {
+		t.Run(name, func(t *testing.T) {
+			var res ProbeResult
+			if err := json.Unmarshal([]byte(sample), &res); err != nil {
+				t.Fatalf("tolerant parse failed: %v", err)
+			}
+			s := res.Streams[0]
+			md, ok := s.MasteringDisplay()
+			if !ok {
+				t.Fatal("mastering display side data not found")
+			}
+			// Both shapes must land on x265's scaled-integer spelling.
+			for _, c := range []struct {
+				label     string
+				got, want int64
+			}{
+				{"red_x", md.RedX.Scaled(50000), 35400},
+				{"red_y", md.RedY.Scaled(50000), 14600},
+				{"green_x", md.GreenX.Scaled(50000), 8500},
+				{"green_y", md.GreenY.Scaled(50000), 39850},
+				{"blue_x", md.BlueX.Scaled(50000), 6550},
+				{"blue_y", md.BlueY.Scaled(50000), 2300},
+				{"white_x", md.WhiteX.Scaled(50000), 15635},
+				{"white_y", md.WhiteY.Scaled(50000), 16450},
+				{"min_lum", md.MinLuminance.Scaled(10000), 1},
+				{"max_lum", md.MaxLuminance.Scaled(10000), 10000000},
+			} {
+				if c.got != c.want {
+					t.Errorf("%s = %d, want %d", c.label, c.got, c.want)
+				}
+			}
+			cl, ok := s.ContentLight()
+			if !ok {
+				t.Fatal("content light side data not found")
+			}
+			if cl.MaxContent.Scaled(1) != 1000 || cl.MaxAverage.Scaled(1) != 400 {
+				t.Fatalf("content light = %d/%d, want 1000/400", cl.MaxContent.Scaled(1), cl.MaxAverage.Scaled(1))
+			}
+		})
+	}
+
+	var noSideData ProbeResult
+	if err := json.Unmarshal([]byte(`{"streams": [{"codec_type": "video"}]}`), &noSideData); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := noSideData.Streams[0].MasteringDisplay(); ok {
+		t.Error("absent side data must not report mastering display")
+	}
+	if _, ok := noSideData.Streams[0].ContentLight(); ok {
+		t.Error("absent side data must not report content light")
+	}
+
+	// Junk in a side-data value degrades to zero instead of failing the
+	// whole probe parse.
+	var junk ProbeResult
+	if err := json.Unmarshal([]byte(`{"streams": [{"codec_type": "video", "stream_side_data_list": [
+		{"side_data_type": "Mastering display metadata", "red_x": "nonsense", "max_luminance": "1/0"}]}]}`), &junk); err != nil {
+		t.Fatalf("junk values must not abort the parse: %v", err)
+	}
+	md, _ := junk.Streams[0].MasteringDisplay()
+	if md.RedX.Num != 0 || md.MaxLuminance.Num != 0 {
+		t.Errorf("junk values must degrade to zero, got %+v", md)
+	}
+}

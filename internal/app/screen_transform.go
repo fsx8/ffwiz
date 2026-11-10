@@ -48,7 +48,7 @@ type transformWizard struct {
 	cropY   int
 	srcW    int // probed source dimensions; 0 when unknown
 	srcH    int
-	hdr     hdrWarner // warning for the re-encoding (non-crop) modes
+	hdr     hdrWarner // color-format note + props for the re-encoding modes
 	probing bool
 	spin    spinner.Model
 
@@ -259,9 +259,9 @@ func (m *transformWizard) probeCmd() tea.Cmd {
 
 // applyProbe prefills the crop fields with a centered half-size window and
 // remembers the source dimensions for validation. For the re-encoding
-// modes it collects the HDR/10-bit warning instead. On probe failure the
-// crop fields stay empty ("required" placeholders) and the user enters the
-// values manually.
+// modes it collects the HDR/10-bit note and the color props for the
+// preserving branch instead. On probe failure the crop fields stay empty
+// ("required" placeholders) and the user enters the values manually.
 func (m *transformWizard) applyProbe(msg transformProbeMsg) (tea.Model, tea.Cmd) {
 	if m.step != "probing" || !m.probing {
 		return m, nil
@@ -285,7 +285,8 @@ func (m *transformWizard) applyProbe(msg transformProbeMsg) (tea.Model, tea.Cmd)
 	}
 
 	if msg.stream != nil {
-		m.hdr.note = hdrNoteFor(*msg.stream)
+		m.hdr.note = hdrPreserveNoteFor(*msg.stream)
+		m.hdr.props = colorProps(*msg.stream)
 	}
 	return m.beginOutput()
 }
@@ -358,22 +359,22 @@ func (m *transformWizard) run() (tea.Model, tea.Cmd) {
 	title := ""
 	switch m.mode {
 	case "rotate90":
-		cmd = ffx.BuildRotateCmd(m.filePath, 90, outPath)
+		cmd = ffx.BuildRotateCmd(m.filePath, 90, outPath, m.hdr.props)
 		title = "Rotating video…"
 	case "rotate180":
-		cmd = ffx.BuildRotateCmd(m.filePath, 180, outPath)
+		cmd = ffx.BuildRotateCmd(m.filePath, 180, outPath, m.hdr.props)
 		title = "Rotating video…"
 	case "rotate270":
-		cmd = ffx.BuildRotateCmd(m.filePath, 270, outPath)
+		cmd = ffx.BuildRotateCmd(m.filePath, 270, outPath, m.hdr.props)
 		title = "Rotating video…"
 	case "fliph":
-		cmd = ffx.BuildFlipCmd(m.filePath, "h", outPath)
+		cmd = ffx.BuildFlipCmd(m.filePath, "h", outPath, m.hdr.props)
 		title = "Flipping video…"
 	case "flipv":
-		cmd = ffx.BuildFlipCmd(m.filePath, "v", outPath)
+		cmd = ffx.BuildFlipCmd(m.filePath, "v", outPath, m.hdr.props)
 		title = "Flipping video…"
 	case "crop":
-		cmd = ffx.BuildCropCmd(m.filePath, m.cropX, m.cropY, m.cropW, m.cropH, outPath)
+		cmd = ffx.BuildCropCmd(m.filePath, m.cropX, m.cropY, m.cropW, m.cropH, outPath, m.hdr.props)
 		title = "Cropping video…"
 	}
 	return m, push(newExecScreen(m.cfg, title, execx.Cmd{Name: "ffmpeg", Args: cmd.Args}))

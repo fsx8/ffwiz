@@ -131,6 +131,47 @@ func TestBuildCropCmd_OriginOffsetsAreAccepted(t *testing.T) {
 	}
 }
 
+// The HDR branch composes setparams after the geometric filter for every
+// transform mode and re-encodes in 10-bit HEVC.
+func TestBuildTransformCmds_HDRComposeAfterGeometry(t *testing.T) {
+	cases := []struct {
+		name   string
+		build  func() []string
+		wantVF string
+	}{
+		{"rotate90", func() []string { return BuildRotateCmd("in.mkv", 90, "out.mkv", testHDRProps).Args }, "transpose=1," + testHDRSuffix},
+		{"rotate180", func() []string { return BuildRotateCmd("in.mkv", 180, "out.mkv", testHDRProps).Args }, "hflip,vflip," + testHDRSuffix},
+		{"fliph", func() []string { return BuildFlipCmd("in.mkv", "h", "out.mkv", testHDRProps).Args }, "hflip," + testHDRSuffix},
+		{"crop", func() []string { return BuildCropCmd("in.mkv", 0, 0, 320, 240, "out.mkv", testHDRProps).Args }, "crop=w=320:h=240:x=0:y=0," + testHDRSuffix},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			args := c.build()
+			if got := flagValue(args, "-vf"); got != c.wantVF {
+				t.Fatalf("-vf = %q, want %q", got, c.wantVF)
+			}
+			if got := flagValue(args, "-c:v"); got != "libx265" {
+				t.Fatalf("-c:v = %q, want libx265", got)
+			}
+			if got := flagValue(args, "-crf"); got != "22" {
+				t.Fatalf("-crf = %q, want 22", got)
+			}
+			if got := flagValue(args, "-preset"); got != "medium" {
+				t.Fatalf("-preset = %q, want medium", got)
+			}
+			if got := flagValue(args, "-x265-params"); got != testHDRParams {
+				t.Fatalf("-x265-params = %q, want %q", got, testHDRParams)
+			}
+			if got := flagValue(args, "-pix_fmt"); got != "" {
+				t.Fatalf("the HDR branch must not force -pix_fmt, got %q", got)
+			}
+			if got := flagValue(args, "-c:a"); got != "copy" {
+				t.Fatalf("-c:a = %q, want copy", got)
+			}
+		})
+	}
+}
+
 func TestRotateOutputName(t *testing.T) {
 	cases := map[int]string{
 		90:  "clip_rot90.mp4",

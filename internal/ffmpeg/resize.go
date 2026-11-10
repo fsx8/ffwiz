@@ -17,8 +17,20 @@ func ResizeOutputName(inputPath, label string) string {
 // BuildResizeCmd scales the video to width x height and re-encodes it with
 // libx264 while stream-copying audio. Either dimension may be -2, which the
 // scale filter interprets as "derive it automatically from the aspect ratio
-// and round to an even value"; the caller decides what to auto-fill.
-func BuildResizeCmd(inputPath string, width, height int, outputPath string) Cmd {
+// and round to an even value"; the caller decides what to auto-fill. An
+// optional trailing ColorProps (the probed color format) switches to
+// 10-bit HEVC with the source's HDR signaling laid in via setparams after
+// the scale filter; omitting it keeps the historical 8-bit x264 command.
+func BuildResizeCmd(inputPath string, width, height int, outputPath string, color ...ColorProps) Cmd {
+	if c := hdrProps(color); c.HDR() {
+		args := append([]string{
+			"-i", inputPath,
+			"-vf", fmt.Sprintf("scale=w=%d:h=%d,%s", width, height, c.FilterSuffix()),
+		}, x265HDRArgs(c, "22", "medium")...)
+		return Cmd{
+			Args: append(args, "-c:a", "copy", "-y", outputPath),
+		}
+	}
 	return Cmd{
 		Args: []string{
 			"-i", inputPath,
