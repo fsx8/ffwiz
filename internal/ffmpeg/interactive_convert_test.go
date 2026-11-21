@@ -559,3 +559,195 @@ func TestInteractiveConvert_X264OnHDRStaysEightBit(t *testing.T) {
 		t.Fatalf("x264 conversion must not filter, got -filter:v:0 %q", got)
 	}
 }
+
+// --- added (external) tracks ---
+
+func inputsOf(args []string) []string {
+	var out []string
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "-i" {
+			out = append(out, args[i+1])
+		}
+	}
+	return out
+}
+
+// Two external sources in a mixed keep/convert/remove scenario: inputs
+// open in first-appearance order, main streams map 0:<Index>, imported
+// streams map <slot>:<SourceIndex>, and the -map groups stay video,
+// audio, subtitle.
+func TestInteractiveConvert_TwoExternalInputsMapOrderAndSlots(t *testing.T) {
+	tracks := []Track{
+		{Index: 0, Type: TrackVideo, Codec: "h264"},
+		{Index: 1, Type: TrackAudio, Codec: "aac"},
+		{Index: 2, Type: TrackSubtitle, Codec: "subrip"},
+		{SourceFile: "subs.srt", Index: 0, SourceIndex: 0, Type: TrackSubtitle, Codec: "subrip"},
+		{SourceFile: "extra.dts.mkv", Index: 3, SourceIndex: 3, Type: TrackAudio, Codec: "dts"},
+	}
+	actions := map[int]TrackActionInfo{
+		1: {Action: ActionRemove},                      // main audio gone
+		3: {Action: ActionKeep},                        // added srt stays copy
+		4: {Action: ActionConvert, Codec: "aac (AAC)"}, // added dts converts
+	}
+	cmd := BuildInteractiveConvertCmd("movie.mkv", "out.mkv", tracks, actions)
+	if cmd == nil {
+		t.Fatal("expected cmd")
+	}
+	if got, want := inputsOf(cmd.Args), []string{"movie.mkv", "subs.srt", "extra.dts.mkv"}; !equalStrings(got, want) {
+		t.Fatalf("inputs mismatch\ngot:  %#v\nwant: %#v", got, want)
+	}
+	if got, want := maps(cmd.Args), []string{"0:0", "2:3", "0:2", "1:0"}; !equalStrings(got, want) {
+		t.Fatalf("maps mismatch\ngot:  %#v\nwant: %#v", got, want)
+	}
+	if got := flagValue(cmd.Args, "-c:a:0"); got != "aac" {
+		t.Fatalf("added dts must convert to aac, got -c:a:0 %q", got)
+	}
+	if got := flagValue(cmd.Args, "-b:a:0"); got != "192k" {
+		t.Fatalf("converted audio must carry the bitrate, got %q", got)
+	}
+	if got := flagValue(cmd.Args, "-c:s:0"); got != "copy" || flagValue(cmd.Args, "-c:s:1") != "copy" {
+		t.Fatalf("kept subs must stay copy in mkv, got %q/%q", flagValue(cmd.Args, "-c:s:0"), flagValue(cmd.Args, "-c:s:1"))
+	}
+}
+
+func TestInteractiveConvert_AddedSrtIntoMp4BecomesMovText(t *testing.T) {
+	tracks := []Track{
+		{Index: 0, Type: TrackVideo, Codec: "h264"},
+		{SourceFile: "subs.srt", Index: 0, SourceIndex: 0, Type: TrackSubtitle, Codec: "subrip"},
+	}
+	cmd := BuildInteractiveConvertCmd("in.mkv", "out.mp4", tracks, nil)
+	if cmd == nil {
+		t.Fatal("expected cmd")
+	}
+	if got := flagValue(cmd.Args, "-c:s:0"); got != "mov_text" {
+		t.Fatalf("an added srt cannot copy into mp4; expected mov_text, got %q", got)
+	}
+}
+
+func TestInteractiveConvert_AddedDtsIntoMp4BecomesAac(t *testing.T) {
+	tracks := []Track{
+		{Index: 0, Type: TrackVideo, Codec: "h264"},
+		{SourceFile: "sound.dts", Index: 0, SourceIndex: 0, Type: TrackAudio, Codec: "dts"},
+	}
+	cmd := BuildInteractiveConvertCmd("in.mkv", "out.mp4", tracks, nil)
+	if cmd == nil {
+		t.Fatal("expected cmd")
+	}
+	if got := flagValue(cmd.Args, "-c:a:0"); got != "aac" {
+		t.Fatalf("an added dts cannot copy into mp4; expected aac, got %q", got)
+	}
+}
+
+// A bitmap sidecar (.sup) cannot be muxed into mp4 at all — it must be
+// dropped like a bitmap stream of the main input would be.
+func TestInteractiveConvert_AddedPgsIntoMp4IsDropped(t *testing.T) {
+	tracks := []Track{
+		{Index: 0, Type: TrackVideo, Codec: "h264"},
+		{SourceFile: "titles.sup", Index: 0, SourceIndex: 0, Type: TrackSubtitle, Codec: "hdmv_pgs_subtitle"},
+	}
+	cmd := BuildInteractiveConvertCmd("in.mkv", "out.mp4", tracks, nil)
+	if cmd == nil {
+		t.Fatal("expected cmd (video kept)")
+	}
+	if got, want := maps(cmd.Args), []string{"0:0"}; !equalStrings(got, want) {
+		t.Fatalf("the added sup must not be mapped: got %#v want %#v", got, want)
+	}
+	if got := flagValue(cmd.Args, "-c:s:0"); got != "" {
+		t.Fatalf("expected no -c:s:0 for the dropped sup, got %q", got)
+	}
+	// The dropped file must not get a needless -i either.
+	if got, want := inputsOf(cmd.Args), []string{"in.mkv"}; !equalStrings(got, want) {
+		t.Fatalf("inputs mismatch\ngot:  %#v\nwant: %#v", got, want)
+	}
+}
+
+// Added tracks count as output: with every main stream removed, one added
+// srt still produces a (video + subtitle) command.
+func TestInteractiveConvert_AddedTrackAloneCountsAsRemainingOutput(t *testing.T) {
+	tracks := []Track{
+		{Index: 0, Type: TrackVideo, Codec: "h264"},
+		{Index: 1, Type: TrackAudio, Codec: "aac"},
+		{Index: 2, Type: TrackSubtitle, Codec: "subrip"},
+		{SourceFile: "subs.srt", Index: 0, SourceIndex: 0, Type: TrackSubtitle, Codec: "subrip"},
+	}
+	actions := map[int]TrackActionInfo{
+		1: {Action: ActionRemove},
+		2: {Action: ActionRemove},
+	}
+	cmd := BuildInteractiveConvertCmd("in.mkv", "out.mkv", tracks, actions)
+	if cmd == nil {
+		t.Fatal("expected cmd (video + added srt remain)")
+	}
+	if got, want := maps(cmd.Args), []string{"0:0", "1:0"}; !equalStrings(got, want) {
+		t.Fatalf("maps mismatch\ngot:  %#v\nwant: %#v", got, want)
+	}
+}
+
+func TestInteractiveConvert_AllRemovedWithAddsStillReturnsNil(t *testing.T) {
+	tracks := []Track{
+		{Index: 0, Type: TrackVideo, Codec: "h264"},
+		{SourceFile: "subs.srt", Index: 0, SourceIndex: 0, Type: TrackSubtitle, Codec: "subrip"},
+	}
+	actions := map[int]TrackActionInfo{
+		0: {Action: ActionRemove},
+		1: {Action: ActionRemove},
+	}
+	if cmd := BuildInteractiveConvertCmd("in.mkv", "out.mkv", tracks, actions); cmd != nil {
+		t.Fatalf("expected nil cmd, got %+v", cmd)
+	}
+}
+
+func TestInteractiveConvert_WebmDropsAddedSubs(t *testing.T) {
+	tracks := []Track{
+		{Index: 0, Type: TrackVideo, Codec: "h264"},
+		{SourceFile: "subs.srt", Index: 0, SourceIndex: 0, Type: TrackSubtitle, Codec: "subrip"},
+	}
+	cmd := BuildInteractiveConvertCmd("in.mkv", "out.webm", tracks, nil)
+	if cmd == nil {
+		t.Fatal("expected cmd (video kept)")
+	}
+	if got, want := maps(cmd.Args), []string{"0:0"}; !equalStrings(got, want) {
+		t.Fatalf("webm cannot carry subtitles; maps: got %#v want %#v", got, want)
+	}
+	if got, want := inputsOf(cmd.Args), []string{"in.mkv"}; !equalStrings(got, want) {
+		t.Fatalf("the dropped side file must not get an input\ngot:  %#v\nwant: %#v", got, want)
+	}
+}
+
+// Several tracks imported from one file share a single -i input.
+func TestInteractiveConvert_SameExternalFileOpensOnce(t *testing.T) {
+	tracks := []Track{
+		{Index: 0, Type: TrackVideo, Codec: "h264"},
+		{SourceFile: "dual.mka", Index: 0, SourceIndex: 0, Type: TrackAudio, Codec: "flac"},
+		{SourceFile: "dual.mka", Index: 1, SourceIndex: 1, Type: TrackAudio, Codec: "aac"},
+	}
+	cmd := BuildInteractiveConvertCmd("in.mkv", "out.mkv", tracks, nil)
+	if cmd == nil {
+		t.Fatal("expected cmd")
+	}
+	if got, want := inputsOf(cmd.Args), []string{"in.mkv", "dual.mka"}; !equalStrings(got, want) {
+		t.Fatalf("inputs mismatch\ngot:  %#v\nwant: %#v", got, want)
+	}
+	if got, want := maps(cmd.Args), []string{"0:0", "1:0", "1:1"}; !equalStrings(got, want) {
+		t.Fatalf("maps mismatch\ngot:  %#v\nwant: %#v", got, want)
+	}
+}
+
+// A side file equal to the main input needs no extra input: its stream
+// indexes are already input 0's.
+func TestInteractiveConvert_ExternalSourceEqualsInputStaysSlotZero(t *testing.T) {
+	tracks := []Track{
+		{Index: 0, Type: TrackVideo, Codec: "h264"},
+		{SourceFile: "in.mkv", Index: 1, SourceIndex: 1, Type: TrackSubtitle, Codec: "subrip"},
+	}
+	cmd := BuildInteractiveConvertCmd("in.mkv", "out.mkv", tracks, nil)
+	if cmd == nil {
+		t.Fatal("expected cmd")
+	}
+	if got, want := inputsOf(cmd.Args), []string{"in.mkv"}; !equalStrings(got, want) {
+		t.Fatalf("inputs mismatch\ngot:  %#v\nwant: %#v", got, want)
+	}
+	if got, want := maps(cmd.Args), []string{"0:0", "0:1"}; !equalStrings(got, want) {
+		t.Fatalf("maps mismatch\ngot:  %#v\nwant: %#v", got, want)
+	}
+}

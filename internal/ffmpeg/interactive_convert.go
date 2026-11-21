@@ -40,10 +40,14 @@ type outTrack struct {
 }
 
 // BuildInteractiveConvertCmd maps the kept tracks of the input and applies
-// per-track actions. Codecs are normalized for the output container (see
-// NormalizeCodecForContainer); the confirm screen should preview the
-// command returned here so users see the final arguments.
-// Returns nil when nothing remains to be written.
+// per-track actions. Tracks imported from external files (Track.SourceFile,
+// e.g. a downloaded .srt merged in as an extra subtitle track) are opened
+// as their own -i inputs and mapped from those. Codecs are normalized for
+// the output container (see NormalizeCodecForContainer); the confirm
+// screen should preview the command returned here so users see the final
+// arguments.
+// Returns nil when nothing remains to be written — an added track counts
+// as remaining output the same as a stream of the main input.
 func BuildInteractiveConvertCmd(inputPath, outputPath string, tracks []Track, actions map[int]TrackActionInfo) *Cmd {
 	var kept []outTrack
 	for i, t := range tracks {
@@ -60,6 +64,8 @@ func BuildInteractiveConvertCmd(inputPath, outputPath string, tracks []Track, ac
 
 	// Resolve codecs: keep => copy, convert => cleaned choice, then adjust
 	// for the output container (may drop streams webm cannot carry).
+	// Imported tracks go through the same normalization, so keeping an
+	// .srt into an .mp4 quietly becomes mov_text.
 	for i := range kept {
 		codec := "copy"
 		if kept[i].action == ActionConvert {
@@ -95,10 +101,30 @@ func BuildInteractiveConvertCmd(inputPath, outputPath string, tracks []Track, ac
 		}
 	}
 
-	args := []string{"-i", inputPath}
+	// The main input is slot 0; every distinct external source file among
+	// the kept tracks is opened as its own input, in first-appearance
+	// order (the order the user added them in). Files whose every track
+	// was removed or dropped never get a needless -i.
+	inputs := []string{inputPath}
+	slots := map[string]int{}
+	for _, ot := range kept {
+		if !ot.external(inputPath) {
+			continue
+		}
+		if _, seen := slots[ot.track.SourceFile]; seen {
+			continue
+		}
+		slots[ot.track.SourceFile] = len(inputs)
+		inputs = append(inputs, ot.track.SourceFile)
+	}
+
+	var args []string
+	for _, in := range inputs {
+		args = append(args, "-i", in)
+	}
 	for _, group := range [][]outTrack{videos, audios, subs} {
 		for _, ot := range group {
-			args = append(args, "-map", fmt.Sprintf("0:%d", ot.track.Index))
+			args = append(args, "-map", ot.mapRef(inputPath, slots))
 		}
 	}
 
@@ -130,6 +156,25 @@ func filterDropped(kept []outTrack) []outTrack {
 		}
 	}
 	return out
+}
+
+// external reports whether the track is imported from a side file rather
+// than being a stream of the main input. A source file equal to the main
+// input needs no extra -i: its stream indexes are already input 0's.
+func (ot outTrack) external(inputPath string) bool {
+	sf := ot.track.SourceFile
+	return sf != "" && sf != inputPath
+}
+
+// mapRef builds the -map reference: main-input streams map 0:<Index>,
+// imported streams map <slot>:<SourceIndex> from the input their source
+// file was opened as (slots is populated from the same kept tracks, so a
+// lookup always succeeds).
+func (ot outTrack) mapRef(inputPath string, slots map[string]int) string {
+	if !ot.external(inputPath) {
+		return fmt.Sprintf("0:%d", ot.track.Index)
+	}
+	return fmt.Sprintf("%d:%d", slots[ot.track.SourceFile], ot.track.SourceIndex)
 }
 
 func appendVideoArgs(args []string, outIndex int, ot outTrack, tagHVC1 bool) []string {

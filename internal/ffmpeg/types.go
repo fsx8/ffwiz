@@ -27,6 +27,12 @@ type Track struct {
 	// SDR or unknown); a libx265 conversion of an HDR/10-bit track gets the
 	// 10-bit preserving branch instead of defaulting to 8-bit.
 	Color ColorProps
+	// SourceFile is the external file this track is imported from ("" for
+	// a stream of the main input); SourceIndex is the stream index within
+	// that file. Each distinct SourceFile becomes its own -i input and the
+	// track is mapped from that input slot instead of 0.
+	SourceFile  string
+	SourceIndex int
 }
 
 type TrackAction string

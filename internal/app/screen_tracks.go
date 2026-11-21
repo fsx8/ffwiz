@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -17,11 +18,19 @@ import (
 	"github.com/fsx8/ffwiz/internal/execx"
 	ffx "github.com/fsx8/ffwiz/internal/ffmpeg"
 	"github.com/fsx8/ffwiz/internal/ffprobe"
+	"github.com/fsx8/ffwiz/internal/media"
 )
 
 type tracksDoneMsg struct {
 	tracks []trackView
 	err    error
+}
+
+// addProbeMsg carries a probed sidecar file back into the add step.
+type addProbeMsg struct {
+	path string
+	res  *ffprobe.ProbeResult
+	err  error
 }
 
 type trackView struct {
@@ -47,7 +56,7 @@ type tracksWizard struct {
 	actions map[int]ffx.TrackActionInfo
 	cursor  int
 
-	step string // "tracks" | "codec" | "output" | "confirm"
+	step string // "tracks" | "add" | "codec" | "output" | "confirm"
 
 	codecList     list.Model
 	codecBulk     bool          // codec choice applies to every track of codecBulkType
@@ -55,6 +64,16 @@ type tracksWizard struct {
 	out           textinput.Model
 	guard         overwriteGuard
 	vp            viewport.Model // scrolls the track list; keys stay with Update
+
+	// Add-track browser (step "add"): browses for external subtitle/audio
+	// files and probes the picked one asynchronously before appending its
+	// streams as new tracks.
+	addDir     string
+	addList    list.Model
+	addListW   int // kept across refreshes so navigation preserves the size
+	addListH   int
+	probing    bool   // an add probe is in flight; later results are stale
+	addingPath string // file being probed, named on the spinner line
 
 	style lipgloss.Style
 	w, h  int
@@ -74,8 +93,20 @@ func newTracksWizard(cfg Config, filePath string) *tracksWizard {
 		actions:  map[int]ffx.TrackActionInfo{},
 		step:     "tracks",
 		out:      out,
+		addList:  newAddList(),
 		style:    lipgloss.NewStyle().Padding(1, 2),
 	}
+}
+
+// newAddList builds an initialized, empty add-browser list. bubbles'
+// SetSize panics on a zero-value Model, and the first WindowSizeMsg
+// arrives long before the browser is ever opened.
+func newAddList() list.Model {
+	l := list.New(nil, list.NewDefaultDelegate(), 0, 0)
+	l.Title = "Add external subtitle/audio tracks"
+	l.SetFilteringEnabled(true)
+	l.DisableQuitKeybindings()
+	return l
 }
 
 func (m *tracksWizard) Init() tea.Cmd {
@@ -108,6 +139,8 @@ func (m *tracksWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.step == "codec" {
 			m.codecList.SetSize(dim(msg.Width, 4), dim(msg.Height, 6))
 		}
+		m.addListW, m.addListH = dim(msg.Width, 4), dim(msg.Height, 6)
+		m.addList.SetSize(m.addListW, m.addListH)
 		m.resizeViewport()
 	case tea.KeyMsg:
 		typing := m.step == "output" && textInputFocused(m.out)
@@ -116,10 +149,13 @@ func (m *tracksWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if typing {
 				break
 			}
+			if m.step == "add" && filterActive(m.addList) {
+				break // q types into the add browser's filter
+			}
 			return m, tea.Quit
 		case "esc":
 			// Esc walks exactly one step back along the flow
-			// (tracks -> output -> confirm; codec branches off tracks).
+			// (tracks -> output -> confirm; codec/add branch off tracks).
 			switch m.step {
 			case "confirm":
 				m.guard.armedFor = ""
@@ -138,6 +174,16 @@ func (m *tracksWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.codecBulk = false
 				m.step = "tracks"
 				return m, nil
+			case "add":
+				if filterActive(m.addList) {
+					break // let the list clear/leave its filter
+				}
+				// Leave the browser; an in-flight probe's result is
+				// stale afterwards and gets ignored (m.probing off).
+				m.probing = false
+				m.err = ""
+				m.step = "tracks"
+				return m, nil
 			default:
 				return m, pop()
 			}
@@ -146,7 +192,7 @@ func (m *tracksWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case spinner.TickMsg:
-		if m.loading {
+		if m.loading || m.probing {
 			var cmd tea.Cmd
 			m.spin, cmd = m.spin.Update(msg)
 			return m, cmd
@@ -162,6 +208,32 @@ func (m *tracksWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.actions[i] = ffx.TrackActionInfo{Action: ffx.ActionKeep}
 		}
 		return m, nil
+	case addProbeMsg:
+		if !m.probing || m.step != "add" {
+			return m, nil // stale: the user already left the add step
+		}
+		m.probing = false
+		if msg.err != nil {
+			m.err = msg.err.Error()
+			return m, nil
+		}
+		added := addedTracksFromProbe(msg.res, msg.path)
+		if len(added) == 0 {
+			m.err = "no subtitle or audio tracks found in " + filepath.Base(msg.path)
+			return m, nil
+		}
+		m.err = ""
+		first := len(m.tracks)
+		m.tracks = append(m.tracks, added...)
+		for i := first; i < len(m.tracks); i++ {
+			m.actions[i] = ffx.TrackActionInfo{Action: ffx.ActionKeep}
+		}
+		m.cursor = first // land on the first newly added entry
+		// Back to the tracks step so the NEW lines and the cursor
+		// landing are visible; `a` reopens the browser at the same
+		// directory for the next import.
+		m.step = "tracks"
+		return m, nil
 	}
 
 	if m.loading {
@@ -171,6 +243,8 @@ func (m *tracksWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch m.step {
 	case "tracks":
 		return m.updateTracksStep(msg)
+	case "add":
+		return m.updateAddStep(msg)
 	case "codec":
 		var cmd tea.Cmd
 		m.codecList, cmd = m.codecList.Update(msg)
@@ -257,10 +331,20 @@ func (m *tracksWizard) updateTracksStep(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "r":
+			// An imported track has no place in the input file, so
+			// removing it means deleting it from the list entirely —
+			// the output is exactly as if it had never been added.
+			if m.tracks[m.cursor].Track.SourceFile != "" {
+				m.deleteAddedTrack(m.cursor)
+				return m, nil
+			}
 			m.actions[m.cursor] = ffx.TrackActionInfo{Action: ffx.ActionRemove}
 			return m, nil
 		case "k":
 			m.actions[m.cursor] = ffx.TrackActionInfo{Action: ffx.ActionKeep}
+			return m, nil
+		case "a":
+			m.openAddBrowser()
 			return m, nil
 		case "K":
 			for i := range m.tracks {
@@ -316,6 +400,176 @@ func (m *tracksWizard) openCodecChooser(tt ffx.TrackType, bulk bool) {
 	m.step = "codec"
 }
 
+// addTrackExtensions lists the file types offered as import sources in the
+// add browser: external subtitle and audio files. It is deliberately its
+// own set — growing media.go's global video list with subtitle extensions
+// would make bare .srt files show up in every other file listing.
+var addTrackExtensions = map[string]bool{
+	".srt": true, ".ass": true, ".ssa": true, ".vtt": true, ".sup": true,
+	".mka": true, ".mp3": true, ".flac": true, ".wav": true,
+	".ogg": true, ".m4a": true, ".aac": true, ".opus": true,
+}
+
+// addFileItem is a selectable external subtitle/audio file in the add
+// browser.
+type addFileItem struct {
+	name string
+	path string
+}
+
+func (i addFileItem) Title() string       { return i.name }
+func (i addFileItem) Description() string { return "" }
+func (i addFileItem) FilterValue() string { return i.name }
+
+// openAddBrowser branches to the add step, starting the browse next to the
+// loaded media file and remembering the last directory across adds.
+func (m *tracksWizard) openAddBrowser() {
+	if m.addDir == "" {
+		m.addDir = filepath.Dir(m.filePath)
+	}
+	m.err = ""
+	m.refreshAddFiles()
+	m.step = "add"
+}
+
+// isAddTrackFile reports whether a directory entry is an addable side
+// file per addTrackExtensions.
+func isAddTrackFile(name string) bool {
+	return addTrackExtensions[strings.ToLower(filepath.Ext(name))]
+}
+
+// refreshAddFiles rebuilds the add browser for m.addDir: parent entry,
+// subdirectories, then subtitle/audio files per addTrackExtensions. Video
+// files are deliberately absent — adding video tracks is not supported.
+func (m *tracksWizard) refreshAddFiles() {
+	files, dirs, err := media.ListDirMatching(m.addDir, isAddTrackFile)
+	var items []list.Item
+	if err != nil {
+		m.err = err.Error()
+	} else {
+		m.err = ""
+		if parent := filepath.Dir(m.addDir); parent != m.addDir {
+			items = append(items, dirItem{name: "..", path: parent})
+		}
+		for _, d := range dirs {
+			items = append(items, dirItem{name: d, path: filepath.Join(m.addDir, d)})
+		}
+		for _, f := range files {
+			if addTrackExtensions[strings.ToLower(filepath.Ext(f))] {
+				items = append(items, addFileItem{name: f, path: filepath.Join(m.addDir, f)})
+			}
+		}
+	}
+	l := newAddList()
+	l.SetItems(items)
+	if m.addListW > 0 {
+		l.SetSize(m.addListW, m.addListH)
+	}
+	m.addList = l
+}
+
+// updateAddStep runs the add browser. Enter on a directory navigates,
+// Enter on a file starts the add probe; while probing the list is frozen.
+func (m *tracksWizard) updateAddStep(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if km, ok := msg.(tea.KeyMsg); ok {
+		switch km.String() {
+		case "q":
+			if filterActive(m.addList) {
+				break
+			}
+			return m, tea.Quit
+		case "enter":
+			if filterActive(m.addList) || m.probing {
+				break
+			}
+			switch it := m.addList.SelectedItem().(type) {
+			case dirItem:
+				m.addDir = it.path
+				m.refreshAddFiles()
+				return m, nil
+			case addFileItem:
+				return m, m.probeAddCmd(it.path)
+			}
+			return m, nil
+		}
+	}
+	if m.probing {
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.addList, cmd = m.addList.Update(msg)
+	return m, cmd
+}
+
+// probeAddCmd probes the picked sidecar file off the UI thread (bounded by
+// probeTimeout). No cancel func is stored: the result handler ignores
+// anything arriving after the user left the add step (m.probing cleared),
+// and probeTimeout bounds a stuck probe on its own.
+func (m *tracksWizard) probeAddCmd(path string) tea.Cmd {
+	m.probing = true
+	m.addingPath = path
+	m.err = ""
+	return func() tea.Msg {
+		if m.cfg.Prober == nil {
+			return addProbeMsg{path: path, err: errors.New("ffprobe unavailable")}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+		defer cancel()
+		res, err := m.cfg.Prober.Probe(ctx, path)
+		return addProbeMsg{path: path, res: res, err: err}
+	}
+}
+
+// addedTracksFromProbe turns a sidecar file's probe into imported track
+// entries: its subtitle and audio streams become NEW tracks (video and
+// cover art are deliberately not importable), each carrying its source
+// file and stream index so the generator maps it from its own input.
+func addedTracksFromProbe(res *ffprobe.ProbeResult, path string) []trackView {
+	if res == nil {
+		return nil
+	}
+	var out []trackView
+	for _, s := range res.Streams {
+		switch s.CodecType {
+		case "audio", "subtitle":
+		default:
+			continue
+		}
+		out = append(out, trackView{
+			Track: ffx.Track{
+				Index:       s.Index,
+				Type:        ffx.TrackType(s.CodecType),
+				Codec:       s.CodecName,
+				SourceFile:  path,
+				SourceIndex: s.Index,
+			},
+			SampleRate: s.SampleRate,
+			Channels:   s.Channels,
+			Language:   s.Tags["language"],
+			Title:      s.Tags["title"],
+		})
+	}
+	return out
+}
+
+// deleteAddedTrack removes an imported track from the list — the command
+// equivalent of never adding it. The actions map is keyed by list
+// position, so every entry after the deleted one shifts down one slot.
+func (m *tracksWizard) deleteAddedTrack(idx int) {
+	m.tracks = slices.Delete(m.tracks, idx, idx+1)
+	actions := make(map[int]ffx.TrackActionInfo, len(m.actions))
+	for i, info := range m.actions {
+		switch {
+		case i < idx:
+			actions[i] = info
+		case i > idx:
+			actions[i-1] = info
+		}
+	}
+	m.actions = actions
+	m.cursor = min(max(m.cursor, 0), len(m.tracks)-1)
+}
+
 // resizeViewport adapts the track-list viewport to the terminal. The
 // chrome around the list is the title block, the blank separator, and the
 // help/error lines, plus the view padding.
@@ -347,6 +601,15 @@ func (m *tracksWizard) View() string {
 	switch m.step {
 	case "codec":
 		return m.style.Render(m.codecList.View() + "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("Enter to select • Esc to go back • q to quit"))
+	case "add":
+		if m.probing {
+			return m.style.Render(m.spin.View() + " Probing " + filepath.Base(m.addingPath) + "…\n\nEsc to cancel")
+		}
+		info := lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(
+			"Directory: " + m.addDir + "\n" +
+				"/ to filter • Enter adds the file's subtitle/audio tracks • Esc back to tracks • q to quit")
+		errLine := renderErrLine(m.err)
+		return m.style.Render(m.addList.View() + "\n" + info + errLine)
 	case "output":
 		errLine := renderErrLine(m.err)
 		return m.style.Render("Output file:\n\n" + m.out.View() + errLine + "\n\nEnter to continue • Esc to go back • q to quit")
@@ -362,7 +625,7 @@ func (m *tracksWizard) View() string {
 
 func (m *tracksWizard) tracksView() string {
 	title := lipgloss.NewStyle().Bold(true).Render("Interactive Modify Tracks") + "\n\n"
-	help := lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("↑/↓ navigate • r/k/c track • K/R all • C all of type • Enter continue • Esc back • q to quit")
+	help := lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("↑/↓ navigate • r/k/c track • K/R all • C all of type • a add track • Enter continue • Esc back • q to quit")
 	errLine := renderErrLine(m.err)
 	warnLine := m.hdrConvertLine()
 
@@ -376,6 +639,10 @@ func (m *tracksWizard) tracksView() string {
 		actionStr := strings.ToUpper(string(action))
 		if action == ffx.ActionConvert {
 			actionStr += ":" + ffx.CleanCodecChoice(m.actions[i].Codec)
+		} else if action == ffx.ActionKeep && tv.Track.SourceFile != "" {
+			// Keeping an imported track means adding it to the output;
+			// label it NEW so the merge intent stays visible.
+			actionStr = "NEW"
 		}
 		line := prefix + trackLine(i, tv) + "  [" + actionStr + "]"
 		if i == m.cursor {
@@ -472,19 +739,27 @@ func tracksFromProbe(res *ffprobe.ProbeResult) []trackView {
 // wrap its line: the viewport scrolls exactly one line per track.
 const trackTitleBudget = 28
 
+// truncateBudget shortens s to budget runes, ellipsized when longer.
+func truncateBudget(s string, budget int) string {
+	if r := []rune(s); len(r) > budget {
+		return string(r[:budget-1]) + "…"
+	}
+	return s
+}
+
 // titleSuffix renders a track title as a trailing list segment, truncated
 // with an ellipsis when it exceeds the budget.
 func titleSuffix(title string) string {
 	if title == "" {
 		return ""
 	}
-	if r := []rune(title); len(r) > trackTitleBudget {
-		title = string(r[:trackTitleBudget-1]) + "…"
-	}
-	return "  " + title
+	return "  " + truncateBudget(title, trackTitleBudget)
 }
 
 func trackLine(i int, tv trackView) string {
+	if tv.Track.SourceFile != "" {
+		return externalTrackLine(i, tv)
+	}
 	switch tv.Track.Type {
 	case ffx.TrackVideo:
 		return "[" + strconv.Itoa(i) + "] VIDEO  idx=" + strconv.Itoa(tv.Track.Index) + "  " + tv.Track.Codec + "  " + strconv.Itoa(tv.Width) + "x" + strconv.Itoa(tv.Height) + "  " + tv.FPS + titleSuffix(tv.Title)
@@ -502,6 +777,27 @@ func trackLine(i int, tv trackView) string {
 		return "[" + strconv.Itoa(i) + "] SUBS   idx=" + strconv.Itoa(tv.Track.Index) + "  " + tv.Track.Codec + "  " + lang + titleSuffix(tv.Title)
 	default:
 		return "[" + strconv.Itoa(i) + "] " + string(tv.Track.Type) + " idx=" + strconv.Itoa(tv.Track.Index)
+	}
+}
+
+// externalTrackLine renders an imported track: the source file's base name
+// (budget-truncated like every other variable segment) replaces the source
+// stream index, which says nothing about where the track came from.
+func externalTrackLine(i int, tv trackView) string {
+	lang := tv.Language
+	if lang == "" {
+		lang = "und"
+	}
+	file := "file=" + truncateBudget(filepath.Base(tv.Track.SourceFile), trackTitleBudget)
+	switch tv.Track.Type {
+	case ffx.TrackAudio:
+		return "[" + strconv.Itoa(i) + "] AUDIO  " + file + "  " + tv.Track.Codec + "  " + tv.SampleRate + "Hz  " + strconv.Itoa(tv.Channels) + "ch  " + lang + titleSuffix(tv.Title)
+	case ffx.TrackSubtitle:
+		return "[" + strconv.Itoa(i) + "] SUBS   " + file + "  " + tv.Track.Codec + "  " + lang + titleSuffix(tv.Title)
+	case ffx.TrackVideo:
+		return "[" + strconv.Itoa(i) + "] VIDEO  " + file + "  " + tv.Track.Codec + titleSuffix(tv.Title)
+	default:
+		return "[" + strconv.Itoa(i) + "] " + string(tv.Track.Type) + " " + file + titleSuffix(tv.Title)
 	}
 }
 
