@@ -31,6 +31,15 @@ func ListMediaFiles(dir string) ([]string, error) {
 // subdirectory names, both in natural order. Hidden (dot) entries and
 // regular non-media files are omitted.
 func ListDir(dir string) (files, dirs []string, err error) {
+	return ListDirMatching(dir, IsMediaFile)
+}
+
+// ListDirMatching splits a directory's entries like ListDir, but keeps
+// only regular files the matcher accepts. Callers that browse for a
+// specific file kind (e.g. the add-track browser's subtitle/audio set)
+// pass their own matcher instead of the global media list, so browsing
+// here never widens what the rest of the app lists.
+func ListDirMatching(dir string, match func(name string) bool) (files, dirs []string, err error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, nil, err
@@ -49,7 +58,7 @@ func ListDir(dir string) (files, dirs []string, err error) {
 		}
 		if isDir {
 			dirs = append(dirs, e.Name())
-		} else if IsMediaFile(e.Name()) {
+		} else if match(e.Name()) {
 			files = append(files, e.Name())
 		}
 	}
