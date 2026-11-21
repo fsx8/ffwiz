@@ -76,7 +76,8 @@ type tracksWizard struct {
 	addList    list.Model
 	addListW   int // kept across refreshes so navigation preserves the size
 	addListH   int
-	probing    bool   // an add probe is in flight; later results are stale
+	probing    bool // an add probe is in flight; later results are stale
+	addCancel  context.CancelFunc
 	addSeq     int    // increments per add probe; results carry it to be accepted
 	addingPath string // file being probed, named on the spinner line
 
@@ -157,6 +158,12 @@ func (m *tracksWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.step == "add" && filterActive(m.addList) {
 				break // q types into the add browser's filter
 			}
+			m.cancelAddProbe()
+			return m, tea.Quit
+		case "ctrl+c":
+			// Root quits either way; the screen's job is to not leave an
+			// ffprobe orphaned behind it.
+			m.cancelAddProbe()
 			return m, tea.Quit
 		case "esc":
 			// Esc walks exactly one step back along the flow
@@ -183,8 +190,14 @@ func (m *tracksWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if filterActive(m.addList) {
 					break // let the list clear/leave its filter
 				}
-				// Leave the browser; an in-flight probe's result is
-				// stale afterwards and gets ignored (m.probing off).
+				// An applied filter (Enter commits it) is not active, so
+				// the first Esc clears it and stays — mirroring the join
+				// browser — before a second Esc leaves the step.
+				if !m.probing && filterApplied(m.addList) {
+					m.addList.ResetFilter()
+					return m, nil
+				}
+				m.cancelAddProbe()
 				m.probing = false
 				m.err = ""
 				m.step = "tracks"
@@ -493,7 +506,10 @@ func (m *tracksWizard) updateAddStep(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.refreshAddFiles()
 				return m, nil
 			case addFileItem:
-				return m, m.probeAddCmd(it.path)
+				// Batch a spinner tick with the probe so the "Probing …"
+				// line animates; the initial-load ticks have long stopped
+				// by the time an import starts.
+				return m, tea.Batch(m.spin.Tick, m.probeAddCmd(it.path))
 			}
 			return m, nil
 		}
@@ -507,24 +523,34 @@ func (m *tracksWizard) updateAddStep(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // probeAddCmd probes the picked sidecar file off the UI thread (bounded by
-// probeTimeout). No cancel func is stored: results are tied to their
-// request via seq, so a late result from a superseded probe (the user
-// Esc'd out and picked another file) is ignored even while the newer
-// probe is in flight, and probeTimeout bounds a stuck probe on its own.
+// probeTimeout). The cancel func is stored so Esc, q and Ctrl+C abort an
+// in-flight ffprobe instead of leaving it running to completion, and the
+// result's seq drops it when a superseded probe's late message slips
+// through anyway.
 func (m *tracksWizard) probeAddCmd(path string) tea.Cmd {
+	m.cancelAddProbe()
 	m.probing = true
 	m.addingPath = path
 	m.err = ""
 	m.addSeq++
 	seq := m.addSeq
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	m.addCancel = cancel
 	return func() tea.Msg {
 		if m.cfg.Prober == nil {
 			return addProbeMsg{path: path, err: errors.New("ffprobe unavailable"), seq: seq}
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
-		defer cancel()
+		defer cancel() // release the timer on natural completion too
 		res, err := m.cfg.Prober.Probe(ctx, path)
 		return addProbeMsg{path: path, res: res, err: err, seq: seq}
+	}
+}
+
+// cancelAddProbe aborts an in-flight add probe, if any.
+func (m *tracksWizard) cancelAddProbe() {
+	if m.addCancel != nil {
+		m.addCancel()
+		m.addCancel = nil
 	}
 }
 

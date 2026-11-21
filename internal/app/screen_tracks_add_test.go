@@ -6,7 +6,9 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 
 	ffx "github.com/fsx8/ffwiz/internal/ffmpeg"
@@ -280,6 +282,135 @@ func TestTracksWizard_SupersededAddProbeResultIgnored(t *testing.T) {
 	m.Update(msgB) // the probe the user actually asked for lands
 	if len(m.tracks) != 2 || m.tracks[1].Track.SourceFile != b {
 		t.Fatalf("the picked probe must append its file, tracks=%d tracks[1]=%+v", len(m.tracks), m.tracks[1].Track)
+	}
+}
+
+// Quitting (q or ctrl+c) while an add probe is in flight must abort the
+// ffprobe instead of orphaning it, and Esc must cancel it too.
+func TestTracksWizard_AddProbeCancelledOnQuitPaths(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "movie.mp4")
+	writeFile(t, dir, "subs.srt")
+	openBrowser := func(t *testing.T, m *tracksWizard) {
+		t.Helper()
+		m.Update(keyMsg("a"))
+		m.Update(keyMsg("down")) // subs.srt
+		if m.step != "add" {
+			t.Fatalf("expected the add browser, got %q", m.step)
+		}
+	}
+	newWizard := func(t *testing.T, blocker *blockingProbeProber) *tracksWizard {
+		t.Helper()
+		m := newTracksWizard(Config{Prober: blocker}, filepath.Join(dir, "movie.mp4"))
+		m.loading = false
+		m.tracks = []trackView{{Track: ffx.Track{Index: 0, Type: ffx.TrackVideo, Codec: "h264"}}}
+		m.actions[0] = ffx.TrackActionInfo{Action: ffx.ActionKeep}
+		return m
+	}
+	waitCancelled := func(t *testing.T, blocker *blockingProbeProber, what string) {
+		t.Helper()
+		select {
+		case <-blocker.cancelled:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s must cancel the in-flight probe", what)
+		}
+	}
+
+	for _, key := range []string{"q", "ctrl+c"} {
+		t.Run(key, func(t *testing.T) {
+			blocker := &blockingProbeProber{started: make(chan struct{}), cancelled: make(chan struct{})}
+			m := newWizard(t, blocker)
+			openBrowser(t, m)
+			_, cmd := m.Update(keyMsg("enter"))
+			// Execute the returned batch (spinner tick + probe) so the
+			// probe actually runs, like the bubbletea runtime would.
+			go msgsOf(cmd)
+			select {
+			case <-blocker.started:
+			case <-time.After(2 * time.Second):
+				t.Fatal("probe never started")
+			}
+			if !m.probing {
+				t.Fatal("probing must be on while the probe runs")
+			}
+			m.Update(keyMsg(key)) // the quit path under test
+			waitCancelled(t, blocker, key)
+		})
+	}
+
+	t.Run("esc", func(t *testing.T) {
+		blocker := &blockingProbeProber{started: make(chan struct{}), cancelled: make(chan struct{})}
+		m := newWizard(t, blocker)
+		openBrowser(t, m)
+		_, cmd := m.Update(keyMsg("enter"))
+		go msgsOf(cmd)
+		select {
+		case <-blocker.started:
+		case <-time.After(2 * time.Second):
+			t.Fatal("probe never started")
+		}
+		m.Update(keyMsg("esc"))
+		waitCancelled(t, blocker, "esc")
+		if m.step != "tracks" {
+			t.Fatalf("esc must leave the browser, got %q", m.step)
+		}
+	})
+}
+
+// An applied filter (Enter commits it) is not active, so the first Esc
+// clears it and stays in the browser; only the next Esc leaves.
+func TestTracksWizard_EscClearsAppliedFilterBeforeLeaving(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "subs.srt")
+	writeFile(t, dir, "songs.srt")
+	m := tracksWizardLoadedForDir(dir)
+
+	m.Update(keyMsg("a"))
+	m.Update(keyMsg("/"))
+	_, cmd := m.Update(keyMsg("s"))
+	pumpFiltering(t, m, cmd)
+	m.Update(keyMsg("enter")) // commit the filter
+	if filterActive(m.addList) {
+		t.Fatal("enter must commit the filter")
+	}
+	if !filterApplied(m.addList) {
+		t.Fatal("expected an applied filter")
+	}
+
+	m.Update(keyMsg("esc"))
+	if m.step != "add" {
+		t.Fatalf("esc with an applied filter must stay in the browser, got %q", m.step)
+	}
+	if filterApplied(m.addList) {
+		t.Fatal("esc must clear the applied filter")
+	}
+	m.Update(keyMsg("esc"))
+	if m.step != "tracks" {
+		t.Fatalf("the next esc must leave the browser, got %q", m.step)
+	}
+}
+
+// Starting an import must kick the spinner back to life: the initial-load
+// ticks have long stopped, so the probe command alone would render a
+// frozen spinner.
+func TestTracksWizard_ImportProbeRestartsSpinner(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "movie.mp4")
+	writeFile(t, dir, "subs.srt")
+	path := filepath.Join(dir, "subs.srt")
+	cfg := Config{Prober: &fakeProber{results: map[string]*ffprobe.ProbeResult{
+		path: {Streams: []ffprobe.Stream{{Index: 0, CodecType: "subtitle", CodecName: "subrip"}}},
+	}}}
+	m := newTracksWizard(cfg, filepath.Join(dir, "movie.mp4"))
+	m.loading = false
+	m.tracks = []trackView{{Track: ffx.Track{Index: 0, Type: ffx.TrackVideo, Codec: "h264"}}}
+	m.actions[0] = ffx.TrackActionInfo{Action: ffx.ActionKeep}
+
+	m.Update(keyMsg("a"))
+	m.Update(keyMsg("down"))
+	_, cmd := m.Update(keyMsg("enter"))
+	if !hasMsg[spinner.TickMsg](msgsOf(cmd)) {
+		t.Fatal("starting an import must restart the spinner ticks")
 	}
 }
 
