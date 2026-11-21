@@ -462,13 +462,16 @@ func isAddTrackFile(name string) bool {
 func (m *tracksWizard) refreshAddFiles() {
 	files, dirs, err := media.ListDirMatching(m.addDir, isAddTrackFile)
 	var items []list.Item
+	// The parent entry is offered even on failure: an unreadable directory
+	// must stay escapable by climbing out, not only by leaving the browser
+	// (which would reopen it on the next `a`).
+	if parent := filepath.Dir(m.addDir); parent != m.addDir {
+		items = append(items, dirItem{name: "..", path: parent})
+	}
 	if err != nil {
 		m.err = err.Error()
 	} else {
 		m.err = ""
-		if parent := filepath.Dir(m.addDir); parent != m.addDir {
-			items = append(items, dirItem{name: "..", path: parent})
-		}
 		for _, d := range dirs {
 			items = append(items, dirItem{name: d, path: filepath.Join(m.addDir, d)})
 		}

@@ -586,3 +586,32 @@ func TestTracksWizard_AddBrowserDirectoryNavigation(t *testing.T) {
 		t.Fatalf(".. must walk back up, dir = %q", m.addDir)
 	}
 }
+
+// An unreadable/missing directory must not dead-end the browser: the
+// error surfaces but ".." stays listed so the user can climb out.
+func TestTracksWizard_AddBrowserUnreadableDirStaysEscapable(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "subs.srt")
+	m := tracksWizardLoadedForDir(root)
+
+	m.Update(keyMsg("a"))
+	m.addDir = filepath.Join(root, "vanish") // listing will fail
+	m.refreshAddFiles()
+	if m.err == "" {
+		t.Fatal("expected a listing error for a missing directory")
+	}
+	if !slices.Contains(addFileNames(m), "..") {
+		t.Fatalf("the parent entry must stay listed on a failed listing, items: %#v", addFileNames(m))
+	}
+
+	m.Update(keyMsg("enter")) // cursor rests on ".."
+	if m.addDir != root {
+		t.Fatalf("enter on .. must climb out, dir = %q", m.addDir)
+	}
+	if m.err != "" {
+		t.Fatalf("the error must clear on a successful listing, got %q", m.err)
+	}
+	if !slices.Contains(addFileNames(m), "subs.srt") {
+		t.Fatalf("the recovered listing must show the parent's files, items: %#v", addFileNames(m))
+	}
+}
