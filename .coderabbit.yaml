@@ -1,0 +1,59 @@
+# CodeRabbit configuration for fsx8/ffwiz
+# Schema V2 (default). Docs: https://docs.coderabbit.ai/reference/configuration
+
+language: "en-US" # pin English reviews (this is also the default)
+
+tone_instructions: >-
+  Be concise and technical; no pleasantries. Flag only merging-blockers:
+  real bugs, data-loss or stream-handling errors, context-cancellation leaks,
+  or nondeterminism in command generation. Skip style, naming and formatting
+  nitpicks — gofmt, go vet and the two-tier test suite own those.
+
+early_access: false
+
+reviews:
+  profile: quiet # inline only critical/major findings; the rest collapsed
+  path_filters: # never spend the review budget on these
+    - "!docs/**"
+    - "!npm/**"
+    - "!testmedia/**"
+    - "!**/*.gif"
+    - "!**/*.md"
+    - "!**/*.yml"
+  path_instructions:
+    - path: "internal/ffmpeg/**"
+      instructions: >-
+        These files generate FFmpeg argument lists and must stay deterministic
+        pure functions -> Cmd{Args}: no subprocesses, no I/O, no map-iteration
+        ordering. Flag any exec call or nondeterministic output. HDR re-encode
+        paths must keep 10-bit depth and re-assert color signaling via a
+        setparams filter segment; flag any use of -color_* output flags
+        (they do not reach the muxer on ffmpeg 7.1+/8.x).
+    - path: "internal/execx/**"
+      instructions: >-
+        All subprocess execution must respect context cancellation. Flag any
+        code path that could orphan a running ffmpeg when the user presses
+        Esc/Ctrl+C.
+    - path: "internal/app/**"
+      instructions: >-
+        Bubble Tea screens. Navigation must go through push/pop/replace in
+        nav.go. Progress flags are added at execution sites via
+        ffmpeg.AddProgressArgs, never inside the deterministic generators.
+        Added external tracks (Modify Tracks 'a' command) become their own -i
+        input and must pass through the same container normalization as
+        original streams.
+    - path: "cmd/**"
+      instructions: >-
+        Keep flag parsing and version handling minimal; version comes from
+        goreleaser ldflags with module build info fallback.
+
+chat:
+  auto_reply: true
+
+# With <10 stars CodeRabbit requires manual triggers anyway
+# (@coderabbitai review). Once the repo crosses 10 stars, uncomment to
+# enable auto review of every PR plus incremental reviews on new pushes:
+# auto_review:
+#   enabled: true
+#   auto_incremental_review: true
+#   auto_pause_after_reviewed_commits: 3
