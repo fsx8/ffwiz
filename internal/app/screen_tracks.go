@@ -26,11 +26,15 @@ type tracksDoneMsg struct {
 	err    error
 }
 
-// addProbeMsg carries a probed sidecar file back into the add step.
+// addProbeMsg carries a probed sidecar file back into the add step. Seq
+// ties the result to the request that started it: a superseded probe's
+// late result must not append its file while a newer probe is in flight —
+// the probing flag alone cannot tell two in-flight results apart.
 type addProbeMsg struct {
 	path string
 	res  *ffprobe.ProbeResult
 	err  error
+	seq  int
 }
 
 type trackView struct {
@@ -73,6 +77,7 @@ type tracksWizard struct {
 	addListW   int // kept across refreshes so navigation preserves the size
 	addListH   int
 	probing    bool   // an add probe is in flight; later results are stale
+	addSeq     int    // increments per add probe; results carry it to be accepted
 	addingPath string // file being probed, named on the spinner line
 
 	style lipgloss.Style
@@ -209,8 +214,8 @@ func (m *tracksWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case addProbeMsg:
-		if !m.probing || m.step != "add" {
-			return m, nil // stale: the user already left the add step
+		if !m.probing || m.step != "add" || msg.seq != m.addSeq {
+			return m, nil // stale: the user left, or a newer probe superseded this one
 		}
 		m.probing = false
 		if msg.err != nil {
@@ -502,21 +507,24 @@ func (m *tracksWizard) updateAddStep(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // probeAddCmd probes the picked sidecar file off the UI thread (bounded by
-// probeTimeout). No cancel func is stored: the result handler ignores
-// anything arriving after the user left the add step (m.probing cleared),
-// and probeTimeout bounds a stuck probe on its own.
+// probeTimeout). No cancel func is stored: results are tied to their
+// request via seq, so a late result from a superseded probe (the user
+// Esc'd out and picked another file) is ignored even while the newer
+// probe is in flight, and probeTimeout bounds a stuck probe on its own.
 func (m *tracksWizard) probeAddCmd(path string) tea.Cmd {
 	m.probing = true
 	m.addingPath = path
 	m.err = ""
+	m.addSeq++
+	seq := m.addSeq
 	return func() tea.Msg {
 		if m.cfg.Prober == nil {
-			return addProbeMsg{path: path, err: errors.New("ffprobe unavailable")}
+			return addProbeMsg{path: path, err: errors.New("ffprobe unavailable"), seq: seq}
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 		defer cancel()
 		res, err := m.cfg.Prober.Probe(ctx, path)
-		return addProbeMsg{path: path, res: res, err: err}
+		return addProbeMsg{path: path, res: res, err: err, seq: seq}
 	}
 }
 

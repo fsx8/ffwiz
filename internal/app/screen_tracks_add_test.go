@@ -243,6 +243,46 @@ func TestTracksWizard_StaleAddProbeAfterEscIgnored(t *testing.T) {
 	}
 }
 
+// Two probes racing: a superseded probe's late result must not append its
+// file while a newer probe is in flight — after Esc and a second pick, the
+// probing flag alone cannot tell the two in-flight results apart.
+func TestTracksWizard_SupersededAddProbeResultIgnored(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "movie.mp4")
+	writeFile(t, dir, "a.srt")
+	writeFile(t, dir, "b.srt")
+	a, b := filepath.Join(dir, "a.srt"), filepath.Join(dir, "b.srt")
+	sub := func() *ffprobe.ProbeResult {
+		return &ffprobe.ProbeResult{Streams: []ffprobe.Stream{{Index: 0, CodecType: "subtitle", CodecName: "subrip"}}}
+	}
+	cfg := Config{Prober: &fakeProber{results: map[string]*ffprobe.ProbeResult{a: sub(), b: sub()}}}
+	m := newTracksWizard(cfg, filepath.Join(dir, "movie.mp4"))
+	m.loading = false
+	m.tracks = []trackView{{Track: ffx.Track{Index: 0, Type: ffx.TrackVideo, Codec: "h264"}}}
+	m.actions[0] = ffx.TrackActionInfo{Action: ffx.ActionKeep}
+
+	m.Update(keyMsg("a"))
+	m.Update(keyMsg("down"))             // a.srt
+	_, cmdA := m.Update(keyMsg("enter")) // probe A starts
+	msgA := probeMsgOf(t, cmdA)
+	m.Update(keyMsg("esc")) // back out mid-probe; A still in flight
+
+	m.Update(keyMsg("a")) // reopen and pick b.srt unresolved-A
+	m.Update(keyMsg("down"))
+	m.Update(keyMsg("down"))
+	_, cmdB := m.Update(keyMsg("enter")) // probe B starts
+	msgB := probeMsgOf(t, cmdB)
+
+	m.Update(msgA) // A's late result arrives while B is probing
+	if len(m.tracks) != 1 {
+		t.Fatalf("a superseded probe result must be ignored, got %d tracks", len(m.tracks))
+	}
+	m.Update(msgB) // the probe the user actually asked for lands
+	if len(m.tracks) != 2 || m.tracks[1].Track.SourceFile != b {
+		t.Fatalf("the picked probe must append its file, tracks=%d tracks[1]=%+v", len(m.tracks), m.tracks[1].Track)
+	}
+}
+
 // r on an imported track deletes it from the list and shifts the
 // position-keyed actions; r on original tracks stays a remove action.
 func TestTracksWizard_DeleteAddedTrackReindexes(t *testing.T) {
