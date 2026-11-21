@@ -80,6 +80,7 @@ Two-tier contract: unit tests assert on generated arguments and model state with
 - `go test -tags=integration ./...` — end-to-end tests that run real ffmpeg/ffprobe through every feature (trim, join, track editing, batch/GIF, progress parsing) plus a remux scenario matrix over `hdr4k.mkv` (remove/convert audio, keep/remove subtitles, metadata/tag preservation, mkv→mp4/webm container adaptation); they self-skip when tools or fixtures are missing
 - `scripts/testmedia.sh` — regenerates the deterministic fixture set into `testmedia/` (gitignored; lavfi sources, ~25s to build). Includes `hdr4k.mkv`: 4K HEVC 10-bit HDR10 with DTS 5.1 + EAC3 5.1 + AAC and 4 subtitle tracks, plus `hdr_small.mkv`: 480x270 HEVC 10-bit HDR10 + stereo AAC for the fast HDR re-encode tests (both lay the HDR signaling in via the `setparams` filter, never the `-color_*` flags). Note: ffmpeg can only ENCODE DTS core (`-strict -2`, experimental encoder) — DTS-HD MA is decode-only upstream; a true HD-MA sample would have to be supplied manually
 - CI: `.github/workflows/tests.yml` runs both tiers on every push/PR (installs ffmpeg + generates fixtures)
+- Automated PR review: CodeRabbit + Greptile (GitHub Apps, free OSS tiers) and Codex review every PR — config lives in `.coderabbit.yaml` (quiet profile; path instructions mirror the invariants above). Until the repo reaches 10 stars, CodeRabbit must be triggered manually per PR with `@coderabbitai review`
 - Before handing back work: `gofmt -l .`, `go vet ./...`, `go build ./...`, `go test ./...`
 
 ## Release & Distribution

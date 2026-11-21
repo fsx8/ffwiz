@@ -257,6 +257,10 @@ go test -tags=integration ./...           # self-skips if ffmpeg/fixtures are ab
 
 Both tiers run in CI on every push.
 
+### Automated PR review
+
+Pull requests are reviewed by three bots: **CodeRabbit** and **Greptile** (GitHub Apps on their free open-source tiers; config in [`.coderabbit.yaml`](.coderabbit.yaml)) plus **Codex**. Until the repo reaches 10 stars, CodeRabbit is triggered per PR with a `@coderabbitai review` comment; Codex and Greptile review automatically.
+
 ### Demo generation
 
 The screencast above lives at `docs/demo.gif` and can be regenerated from the [vhs](https://github.com/charmbracelet/vhs) script after building the binary (requires local `ffmpeg`):
