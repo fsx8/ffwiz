@@ -118,3 +118,18 @@ Homepage: https://github.com/fsx8/ffwiz
 Description: A powerful and intuitive command-line video editor, built on FFmpeg.
  Requires ffmpeg (with ffprobe) to be installed separately.
 
+Package: ffwiz
+Version: 0.5.0
+Architecture: amd64
+Maintainer: fsx8 <fsx8@users.noreply.github.com>
+Installed-Size: 4536
+Filename: pool/main/f/ffwiz/ffwiz_0.5.0_amd64.deb
+Size: 1746534
+MD5sum: ae47ec432fb8785ca1b8e1adcc382a4e
+SHA1: a946ee1f67967f92ff241d6f81396bbcdd5f72d1
+SHA256: 9f57c071a07ab746568c49b47cba3dbaecb73e7531e4f28ae7af8dfe8b95401e
+Priority: optional
+Homepage: https://github.com/fsx8/ffwiz
+Description: A powerful and intuitive command-line video editor, built on FFmpeg.
+ Requires ffmpeg (with ffprobe) to be installed separately.
+
